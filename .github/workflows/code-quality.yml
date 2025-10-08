@@ -1,0 +1,103 @@
+name: Code Quality Check
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  code-analysis:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Install analysis tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cppcheck clang-tidy g++
+        
+    - name: Static analysis with cppcheck
+      run: |
+        echo "🔍 Running static analysis..."
+        cppcheck --enable=all --error-exitcode=1 --suppress=missingIncludeSystem ga8.cpp 2>&1 | tee cppcheck_results.txt || true
+        
+    - name: Check compilation warnings
+      run: |
+        echo "⚠️ Checking compilation warnings..."
+        g++ -std=c++17 -Wall -Wextra -Wpedantic -O2 ga8.cpp -o ga8_warnings 2>&1 | tee compilation_warnings.txt
+        
+    - name: Code statistics
+      run: |
+        echo "📊 Code Statistics:" > code_stats.txt
+        echo "==================" >> code_stats.txt
+        echo "Lines of code:" >> code_stats.txt
+        wc -l ga8.cpp >> code_stats.txt
+        echo "" >> code_stats.txt
+        echo "Function count:" >> code_stats.txt
+        grep -c "^[a-zA-Z].*{$" ga8.cpp >> code_stats.txt || echo "Could not count functions" >> code_stats.txt
+        echo "" >> code_stats.txt
+        echo "Classes/Structs:" >> code_stats.txt
+        grep -c "^struct\|^class" ga8.cpp >> code_stats.txt || echo "0" >> code_stats.txt
+        
+    - name: Check TODO and FIXME comments
+      run: |
+        echo "📝 TODO/FIXME Analysis:" > todo_analysis.txt
+        echo "======================" >> todo_analysis.txt
+        grep -n -i "todo\|fixme\|hack\|bug" ga8.cpp >> todo_analysis.txt || echo "No TODO/FIXME found" >> todo_analysis.txt
+        
+    - name: Upload analysis results
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: code-analysis-${{ github.run_number }}
+        path: |
+          cppcheck_results.txt
+          compilation_warnings.txt
+          code_stats.txt
+          todo_analysis.txt
+        retention-days: 30
+
+  documentation-check:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Check documentation
+      run: |
+        echo "📚 Documentation Check:" > doc_check.txt
+        echo "======================" >> doc_check.txt
+        
+        # Check if README exists
+        if [ -f "README.md" ]; then
+          echo "✅ README.md exists" >> doc_check.txt
+          echo "README length: $(wc -l < README.md) lines" >> doc_check.txt
+        else
+          echo "❌ README.md missing" >> doc_check.txt
+        fi
+        
+        # Check for comments in code
+        comment_lines=$(grep -c "^\s*//" ga8.cpp || echo 0)
+        total_lines=$(wc -l < ga8.cpp)
+        comment_ratio=$(echo "scale=2; $comment_lines * 100 / $total_lines" | bc -l || echo "0")
+        
+        echo "📈 Code Documentation Metrics:" >> doc_check.txt
+        echo "Comment lines: $comment_lines" >> doc_check.txt
+        echo "Total lines: $total_lines" >> doc_check.txt
+        echo "Comment ratio: $comment_ratio%" >> doc_check.txt
+        
+        # Check for function documentation
+        echo "" >> doc_check.txt
+        echo "🔍 Function Documentation:" >> doc_check.txt
+        grep -B2 -A1 "^[a-zA-Z].*(" ga8.cpp | grep -c "^\s*//" >> doc_check.txt || echo "0 documented functions" >> doc_check.txt
+        
+    - name: Upload documentation check
+      uses: actions/upload-artifact@v3
+      with:
+        name: documentation-check-${{ github.run_number }}
+        path: doc_check.txt
+        retention-days: 30

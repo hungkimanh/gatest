@@ -1,0 +1,75 @@
+name: Performance Benchmark
+
+on:
+  schedule:
+    - cron: '0 2 * * 0'  # Run weekly on Sunday at 2 AM
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup environment
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y g++ build-essential time
+        
+    - name: Compile optimized version
+      run: |
+        g++ -std=c++17 -O3 -DNDEBUG -o ga8_benchmark ga8.cpp
+        echo "✅ Optimized compilation complete"
+        
+    - name: Run benchmark tests
+      run: |
+        echo "🚀 Starting performance benchmarks..."
+        
+        # Test với các file CMT khác nhau nếu có
+        for cmt_file in CMT*.vrp; do
+          if [ -f "$cmt_file" ]; then
+            echo "📊 Testing with $cmt_file"
+            # Modify main function to use different files
+            sed "s/CMT1.vrp/$cmt_file/g" ga8.cpp > ga8_temp.cpp
+            g++ -std=c++17 -O3 -o ga8_test ga8_temp.cpp
+            
+            echo "⏱️ Running benchmark for $cmt_file..."
+            /usr/bin/time -v timeout 300s ./ga8_test 2>&1 | tee benchmark_${cmt_file%.vrp}.log || true
+            
+            rm -f ga8_temp.cpp ga8_test
+          fi
+        done
+        
+    - name: Collect results
+      run: |
+        echo "📈 Benchmark Results Summary:" > benchmark_summary.txt
+        echo "================================" >> benchmark_summary.txt
+        date >> benchmark_summary.txt
+        echo "" >> benchmark_summary.txt
+        
+        if [ -f "ga_results.csv" ]; then
+          echo "Latest Results:" >> benchmark_summary.txt
+          cat ga_results.csv >> benchmark_summary.txt
+          echo "" >> benchmark_summary.txt
+        fi
+        
+        # Collect memory and time info from logs
+        for log_file in benchmark_*.log; do
+          if [ -f "$log_file" ]; then
+            echo "=== $log_file ===" >> benchmark_summary.txt
+            grep -E "(Maximum resident set size|User time|System time|Elapsed)" "$log_file" >> benchmark_summary.txt || true
+            echo "" >> benchmark_summary.txt
+          fi
+        done
+        
+    - name: Upload benchmark results
+      uses: actions/upload-artifact@v3
+      with:
+        name: benchmark-results-${{ github.run_number }}
+        path: |
+          benchmark_*.log
+          benchmark_summary.txt
+          ga_results.csv
+        retention-days: 90
