@@ -1,7 +1,7 @@
 name: Run GA 100 Times
 
 on:
-  workflow_dispatch:  # Allow manual trigger
+  workflow_dispatch:
     inputs:
       test_file:
         description: 'Test file to use (default: CMT1.vrp)'
@@ -15,7 +15,7 @@ on:
 jobs:
   run-ga-multiple:
     runs-on: ubuntu-latest
-    timeout-minutes: 120  # 2 hours timeout
+    timeout-minutes: 120
     
     steps:
     - name: Checkout code
@@ -33,24 +33,21 @@ jobs:
         echo "✅ Compilation complete"
         
     - name: Run GA multiple times
+      env:
+        NUM_RUNS: ${{ github.event.inputs.num_runs || '100' }}
+        TEST_FILE: ${{ github.event.inputs.test_file || 'CMT1.vrp' }}
+        GITHUB_RUN_NUMBER: ${{ github.run_number }}
       run: |
-        echo "🚀 Starting ${{ github.event.inputs.num_runs || '100' }} runs of GA with ${{ github.event.inputs.test_file || 'CMT1.vrp' }}"
+        echo "🚀 Starting $NUM_RUNS runs of GA with $TEST_FILE"
         echo "========================================"
         
-        # Set variables
-        NUM_RUNS=${{ github.event.inputs.num_runs || '100' }}
-        TEST_FILE="${{ github.event.inputs.test_file || 'CMT1.vrp' }}"
-        
         # Clean up old results
-        rm -f ga_results.csv
-        rm -f run_summary.txt
+        rm -f ga_results.csv run_summary.txt
         
         # Create header for summary
         echo "Run,Best_Cost,Is_Feasible,Vehicles_Used,Execution_Time" > run_summary.txt
         
-        echo ""
         echo "🔄 Starting $NUM_RUNS runs..."
-        echo "======================="
         
         # Counter for feasible solutions
         feasible_count=0
@@ -66,7 +63,7 @@ jobs:
             start_time=$(date +%s.%N)
             
             # Run GA and capture output
-            ./ga8 > temp_output_$i.txt 2>&1
+            timeout 300s ./ga8 > temp_output_$i.txt 2>&1
             exit_code=$?
             
             # Record end time
@@ -150,81 +147,37 @@ jobs:
             echo "Best cost: $min_cost"
             echo "Worst cost: $max_cost"
             echo "Average cost: $avg_cost"
-            
-            # Calculate standard deviation
-            sum_sq_diff=0
-            while IFS=, read -r run cost feasible vehicles time; do
-                if [ "$feasible" = "TRUE" ] && [ "$cost" != "ERROR" ]; then
-                    diff=$(echo "$cost - $avg_cost" | bc -l)
-                    sq_diff=$(echo "$diff * $diff" | bc -l)
-                    sum_sq_diff=$(echo "$sum_sq_diff + $sq_diff" | bc -l)
-                fi
-            done < <(tail -n +2 run_summary.txt)  # Skip header
-            
-            if [ $feasible_count -gt 1 ]; then
-                variance=$(echo "scale=4; $sum_sq_diff / ($feasible_count - 1)" | bc -l)
-                std_dev=$(echo "scale=2; sqrt($variance)" | bc -l)
-                echo "Standard deviation: $std_dev"
-            fi
-        fi
-        
-        # Execution time analysis
-        echo ""
-        echo "⏱️ EXECUTION TIME ANALYSIS:"
-        echo "==========================="
-        
-        # Extract execution times (skip header)
-        total_time=0
-        min_time=999999
-        max_time=0
-        count=0
-        
-        while IFS=, read -r run cost feasible vehicles time; do
-            if [ "$time" != "Execution_Time" ] && [ "$time" != "" ]; then
-                total_time=$(echo "$total_time + $time" | bc -l)
-                count=$((count + 1))
-                
-                if (( $(echo "$time < $min_time" | bc -l) )); then
-                    min_time=$time
-                fi
-                if (( $(echo "$time > $max_time" | bc -l) )); then
-                    max_time=$time
-                fi
-            fi
-        done < run_summary.txt
-        
-        if [ $count -gt 0 ]; then
-            avg_time=$(echo "scale=3; $total_time / $count" | bc -l)
-            echo "Fastest run: ${min_time}s"
-            echo "Slowest run: ${max_time}s"
-            echo "Average time: ${avg_time}s"
-            echo "Total time: ${total_time}s"
         fi
         
     - name: Create final summary
+      env:
+        NUM_RUNS: ${{ github.event.inputs.num_runs || '100' }}
+        TEST_FILE: ${{ github.event.inputs.test_file || 'CMT1.vrp' }}
+        GITHUB_RUN_NUMBER: ${{ github.run_number }}
       run: |
         echo "💾 Creating final summary..."
-        
-        # Extract key statistics
-        NUM_RUNS=${{ github.event.inputs.num_runs || '100' }}
-        TEST_FILE="${{ github.event.inputs.test_file || 'CMT1.vrp' }}"
         
         feasible_count=$(grep -c "TRUE" run_summary.txt)
         feasible_percentage=$(echo "scale=1; $feasible_count * 100 / $NUM_RUNS" | bc -l)
         
         # Create comprehensive summary
-        cat > final_summary.txt << EOF
-GA PERFORMANCE ANALYSIS ($NUM_RUNS RUNS)
+        cat > final_summary.txt << 'EOF'
+=================================
+GA PERFORMANCE ANALYSIS
+=================================
+EOF
+        
+        cat >> final_summary.txt << EOF
 Date: $(date)
 Problem: $TEST_FILE
+Runs: $NUM_RUNS
 Population: 500
 Generations: 100
-GitHub Run: ${{ github.run_number }}
+GitHub Run: $GITHUB_RUN_NUMBER
 
 SOLUTION QUALITY:
 - Feasible solutions: $feasible_count/$NUM_RUNS (${feasible_percentage}%)
 - Infeasible solutions: $((NUM_RUNS - feasible_count))/$NUM_RUNS
-
 EOF
         
         if [ $feasible_count -gt 0 ]; then
@@ -235,11 +188,11 @@ EOF
             avg_cost=$(awk '{sum+=$1} END {printf "%.2f", sum/NR}' feasible_costs.txt)
             
             cat >> final_summary.txt << EOF
+
 FEASIBLE COSTS:
 - Best: $min_cost
 - Worst: $max_cost
 - Average: $avg_cost
-
 EOF
             rm -f feasible_costs.txt
         fi
@@ -252,6 +205,7 @@ EOF
         total_time=$(awk '{sum+=$1} END {printf "%.1f", sum}' execution_times.txt)
         
         cat >> final_summary.txt << EOF
+
 EXECUTION TIME:
 - Fastest: ${min_time}s
 - Slowest: ${max_time}s
@@ -276,41 +230,3 @@ EOF
           final_summary.txt
           ga_results.csv
         retention-days: 90
-        
-    - name: Create results comment
-      uses: actions/github-script@v6
-      with:
-        script: |
-          const fs = require('fs');
-          
-          // Read the final summary
-          const summary = fs.readFileSync('final_summary.txt', 'utf8');
-          
-          // Read key results for quick view
-          const runSummary = fs.readFileSync('run_summary.txt', 'utf8');
-          const lines = runSummary.split('\n');
-          const feasibleRuns = lines.filter(line => line.includes('TRUE')).length;
-          const totalRuns = lines.length - 2; // Exclude header and empty line
-          
-          const comment = `## 🎯 GA Multiple Runs Results
-          
-**${{ github.event.inputs.num_runs || '100' }} runs completed successfully!**
-
-### 📊 Quick Stats:
-- ✅ Feasible: ${feasibleRuns}/${{ github.event.inputs.num_runs || '100' }} (${(feasibleRuns * 100 / ${{ github.event.inputs.num_runs || '100' }}).toFixed(1)}%)
-- ❌ Infeasible: ${${{ github.event.inputs.num_runs || '100' }} - feasibleRuns}/${{ github.event.inputs.num_runs || '100' }}
-
-### 📋 Full Summary:
-\`\`\`
-${summary}
-\`\`\`
-
-📥 [Download detailed results](https://github.com/${{github.repository}}/actions/runs/${{github.run_id}})`;
-
-          // Create issue comment (since this is manually triggered)
-          github.rest.repos.createCommitComment({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            commit_sha: context.sha,
-            body: comment
-          });
