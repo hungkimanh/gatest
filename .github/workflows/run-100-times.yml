@@ -214,9 +214,7 @@ jobs:
         
         # Create comprehensive summary
         cat > final_summary.txt << EOF
-=================================
 GA PERFORMANCE ANALYSIS ($NUM_RUNS RUNS)
-=================================
 Date: $(date)
 Problem: $TEST_FILE
 Population: 500
