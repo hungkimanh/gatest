@@ -27,20 +27,37 @@ jobs:
       run: |
         echo "🚀 Starting performance benchmarks..."
         
+        # Remove any existing ga_results.csv to start fresh
+        rm -f ga_results.csv
+        
+        # Test với file CMT1.vrp trước
+        echo "📊 Testing with CMT1.vrp"
+        echo "⏱️ Running benchmark for CMT1.vrp..."
+        timeout 300s ./ga8_benchmark 2>&1 | tee benchmark_CMT1.log || true
+        
         # Test với các file CMT khác nhau nếu có
         for cmt_file in CMT*.vrp; do
-          if [ -f "$cmt_file" ]; then
+          if [ -f "$cmt_file" ] && [ "$cmt_file" != "CMT1.vrp" ]; then
             echo "📊 Testing with $cmt_file"
             # Modify main function to use different files
             sed "s/CMT1.vrp/$cmt_file/g" ga8.cpp > ga8_temp.cpp
             g++ -std=c++17 -O3 -o ga8_test ga8_temp.cpp
             
             echo "⏱️ Running benchmark for $cmt_file..."
-            /usr/bin/time -v timeout 300s ./ga8_test 2>&1 | tee benchmark_${cmt_file%.vrp}.log || true
+            timeout 300s ./ga8_test 2>&1 | tee benchmark_${cmt_file%.vrp}.log || true
             
             rm -f ga8_temp.cpp ga8_test
           fi
         done
+        
+        # Check if results file was created
+        if [ -f "ga_results.csv" ]; then
+          echo "✅ Results file created successfully"
+          echo "📋 Results preview:"
+          cat ga_results.csv
+        else
+          echo "⚠️ No results file generated"
+        fi
         
     - name: Collect results
       run: |

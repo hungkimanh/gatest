@@ -1,0 +1,102 @@
+name: Quick GA Run
+
+on:
+  workflow_dispatch:  # Allow manual trigger
+  push:
+    branches: [ main ]
+
+jobs:
+  run-ga:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup environment
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y g++ build-essential
+        
+    - name: Compile GA program
+      run: |
+        g++ -std=c++17 -O2 -o ga8 ga8.cpp
+        echo "✅ Compilation complete"
+        
+    - name: Run GA and generate results
+      run: |
+        echo "🚀 Running Genetic Algorithm..."
+        ./ga8 2>&1 | tee ga_run.log
+        
+        # Check if CSV file was created
+        if [ -f "ga_results.csv" ]; then
+          echo ""
+          echo "✅ Results generated successfully!"
+          echo "📋 CSV Content:"
+          echo "==============="
+          cat ga_results.csv
+          echo "==============="
+        else
+          echo "⚠️ No CSV results file found"
+        fi
+        
+    - name: Create results summary
+      run: |
+        echo "# GA Results Summary" > results_summary.md
+        echo "" >> results_summary.md
+        echo "**Run Date:** $(date)" >> results_summary.md
+        echo "" >> results_summary.md
+        
+        if [ -f "ga_results.csv" ]; then
+          echo "## CSV Results" >> results_summary.md
+          echo "" >> results_summary.md
+          echo '```csv' >> results_summary.md
+          cat ga_results.csv >> results_summary.md
+          echo '```' >> results_summary.md
+          echo "" >> results_summary.md
+        fi
+        
+        echo "## Full Log" >> results_summary.md
+        echo "" >> results_summary.md
+        echo '```' >> results_summary.md
+        cat ga_run.log >> results_summary.md
+        echo '```' >> results_summary.md
+        
+    - name: Upload results
+      uses: actions/upload-artifact@v3
+      with:
+        name: ga-results-${{ github.run_number }}
+        path: |
+          ga_results.csv
+          ga_run.log
+          results_summary.md
+        retention-days: 30
+        
+    - name: Comment results on commit (if push)
+      if: github.event_name == 'push'
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const fs = require('fs');
+          
+          if (fs.existsSync('ga_results.csv')) {
+            const csvContent = fs.readFileSync('ga_results.csv', 'utf8');
+            
+            const comment = `## 🎯 GA Results
+            
+**Latest run completed successfully!**
+
+\`\`\`csv
+${csvContent}
+\`\`\`
+
+📊 [Download full results](https://github.com/${{github.repository}}/actions/runs/${{github.run_id}})`;
+
+            // Comment on the commit
+            github.rest.repos.createCommitComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              commit_sha: context.sha,
+              body: comment
+            });
+          }
