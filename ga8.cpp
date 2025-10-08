@@ -1,0 +1,1648 @@
+#include <iostream>
+#include <vector>
+#include <fstream>
+#include <sstream>
+#include <cmath>
+#include <algorithm>
+#include <random>
+#include <limits>
+#include <iomanip>
+#include <numeric>
+#include <set>
+#include <map>
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+using namespace std;
+
+// ======= UTILITY FUNCTIONS =======
+
+double euclidDist(double x1, double y1, double x2, double y2) {
+    double d = sqrt((x1-x2)*(x1-x2) + (y1-y2)*(y1-y2));
+    return std::round(d * 100.0) / 100.0;
+}
+
+void readCVRP(const string& filename, int& n, int& capacity, vector<pair<double,double>>& coords, vector<int>& demand, int& depot) {
+    ifstream file(filename);
+    if (!file.is_open()) {
+        cerr << "Khong the mo file " << filename << endl;
+        exit(1);
+    }
+    string line;
+    n = 0; capacity = 0; depot = 0;
+    while (getline(file, line)) {
+        if (line.find("DIMENSION") != string::npos) {
+            size_t pos = line.find(":");
+            if (pos != string::npos) n = stoi(line.substr(pos+1));
+        } else if (line.find("CAPACITY") != string::npos) {
+            size_t pos = line.find(":");
+            if (pos != string::npos) capacity = stoi(line.substr(pos+1));
+        } else if (line.find("NODE_COORD_SECTION") != string::npos) {
+            break;
+        }
+    }
+    if (n <= 0) {
+        cerr << "DIMENSION khong hop le trong file." << endl;
+        exit(1);
+    }
+    coords.assign(n+1, {0.0, 0.0});
+    for (int i = 0; i < n; ++i) {
+        int idx;
+        double x, y;
+        if (!(file >> idx >> x >> y)) {
+            cerr << "Loi khi doc NODE_COORD_SECTION." << endl;
+            exit(1);
+        }
+        if (idx >= 0 && idx <= n) coords[idx] = {x, y};
+    }
+    getline(file, line);
+    while (getline(file, line)) {
+        if (line.find("DEMAND_SECTION") != string::npos) break;
+    }
+    demand.assign(n+1, 0);
+    for (int i = 0; i < n; ++i) {
+        int idx, d;
+        if (!(file >> idx >> d)) {
+            cerr << "Loi khi doc DEMAND_SECTION." << endl;
+            exit(1);
+        }
+        if (idx >= 0 && idx <= n) demand[idx] = d;
+    }
+    getline(file, line);
+    while (getline(file, line)) {
+        if (line.find("DEPOT_SECTION") != string::npos) break;
+    }
+    int val;
+    depot = -1;
+    while (file >> val) {
+        if (val == -1) break;
+        if (depot == -1) depot = val;
+    }
+    if (depot == -1) {
+        cerr << "Khong tim thay DEPOT trong file." << endl;
+        exit(1);
+    }
+}
+
+vector<vector<double>> buildDist(const vector<pair<double,double>>& coords) {
+    int n = coords.size() - 1;
+    vector<vector<double>> dist(n+1, vector<double>(n+1, 0));
+    for (int i = 1; i <= n; ++i)
+        for (int j = 1; j <= n; ++j)
+            dist[i][j] = euclidDist(coords[i].first, coords[i].second, coords[j].first, coords[j].second);
+    return dist;
+}
+
+int routeDemand(const vector<int>& route, const vector<int>& demand) {
+    int sum = 0;
+    for (size_t i = 1; i < route.size() - 1; ++i) {
+        int customer = route[i];
+        if (customer > 0 && customer < (int)demand.size()) {
+            sum += demand[customer];
+        }
+    }
+    return sum;
+}
+
+double routeCost(const vector<int>& route, const vector<vector<double>>& dist) {
+    double cost = 0;
+    for (size_t i = 0; i < route.size() - 1; ++i)
+        cost += dist[route[i]][route[i+1]];
+    return cost;
+}
+
+double totalCost(const vector<vector<int>>& routes, const vector<vector<double>>& dist) {
+    double sum = 0;
+    for (const auto& r : routes) 
+        sum += routeCost(r, dist);
+    return sum;
+}
+
+bool checkSolution(const vector<vector<int>>& routes, const vector<int>& demand, int capacity, int n) {
+    vector<bool> visited(n+1, false);
+    for (const auto& route : routes) {
+        if (routeDemand(route, demand) > capacity) return false;
+        for (size_t i = 1; i < route.size() - 1; ++i) {
+            if (visited[route[i]]) return false;
+            visited[route[i]] = true;
+        }
+    }
+    for (int i = 2; i <= n; ++i)
+        if (!visited[i]) return false;
+    return true;
+}
+
+double polarAngle(const pair<double, double>& depot, const pair<double, double>& customer, bool normalize = false) {
+    double dx = customer.first - depot.first;
+    double dy = customer.second - depot.second;
+    double angle = atan2(dy, dx);
+    
+    if (normalize && angle < 0) {
+        angle += 2 * M_PI; // Chuyển từ [-π, π] sang [0, 2π]
+    }
+    
+    return angle;
+}
+
+// ======= DECODING & FITNESS CALCULATION =======
+
+vector<vector<int>> decodeSeq(const vector<int>& seq, int depot) {
+    vector<vector<int>> routes;
+    vector<int> currentRoute = {depot};
+    for (int v : seq) {
+        if (v == 0) {
+            currentRoute.push_back(depot);
+            routes.push_back(currentRoute);
+            currentRoute = {depot};
+        } else {
+            currentRoute.push_back(v);
+        }
+    }
+    if (currentRoute.size() > 1) {
+        currentRoute.push_back(depot);
+        routes.push_back(currentRoute);
+    }
+    return routes;
+}
+
+double calculateFitness(const vector<int>& seq, const vector<pair<double,double>>& coords,
+                       const vector<int>& demand, int capacity, int depot) {
+    
+    if (seq.empty()) {
+        return 1e6; // Heavy penalty for empty sequence
+    }
+    
+    vector<vector<int>> routes = decodeSeq(seq, depot);
+    if (routes.empty()) {
+        return 1e6; // Heavy penalty for no routes
+    }
+    
+    double totalCost = 0;
+    double totalPenalty = 0;
+    
+    for (const auto& route : routes) {
+        if (route.size() < 2) continue; // Skip invalid routes
+        
+        int routeDemand = 0;
+        double routeCost = 0;
+        
+        // Calculate route demand
+        for (size_t i = 1; i < route.size() - 1; i++) {
+            int customer = route[i];
+            if (customer > 0 && customer < (int)demand.size()) {
+                routeDemand += demand[customer];
+            }
+        }
+        
+        // Capacity penalty
+        if (routeDemand > capacity) {
+            // Heavy penalty proportional to violation
+            double violation = routeDemand - capacity;
+            totalPenalty += 1000.0 * violation;
+        }
+        
+        // Calculate route distance cost
+        for (size_t i = 0; i < route.size() - 1; i++) {
+            int from = route[i];
+            int to = route[i + 1];
+            
+            if (from >= 0 && from < (int)coords.size() && 
+                to >= 0 && to < (int)coords.size()) {
+                routeCost += euclidDist(coords[from].first, coords[from].second,
+                                      coords[to].first, coords[to].second);
+            }
+        }
+        
+        totalCost += routeCost;
+    }
+    
+    return totalCost + totalPenalty;
+}
+
+bool validateCapacity(const vector<int>& seq, const vector<int>& demand, int capacity, int depot) {
+    vector<vector<int>> routes = decodeSeq(seq, depot);
+    
+    for (const auto& route : routes) {
+        int routeDemand = 0;
+        for (size_t i = 1; i < route.size() - 1; i++) {
+            int customer = route[i];
+            if (customer > 0 && customer < (int)demand.size()) {
+                routeDemand += demand[customer];
+            }
+        }
+        
+        if (routeDemand > capacity) {
+            return false;
+        }
+    }
+    
+    return true;
+}
+vector<int> twoOptImproveCustomers(const vector<int>& customers, const vector<vector<double>>& dist, int depot, int maxIter = 50) {
+    if (customers.size() < 3) return customers;
+    
+    // Kiểm tra bounds của dist matrix
+    int maxNode = dist.size() - 1;
+    for (int cust : customers) {
+        if (cust < 0 || cust > maxNode) {
+            return customers; // Return original if invalid customer
+        }
+    }
+    
+    vector<int> route = customers;
+    bool improved = true;
+    int iter = 0;
+    
+    while (improved && iter++ < maxIter) {
+        improved = false;
+        for (size_t i = 0; i + 1 < route.size(); ++i) {
+            for (size_t k = i + 2; k < route.size(); ++k) {
+                // Xác định các node liền kề an toàn
+                int a = (i == 0) ? depot : route[i-1];
+                int b = route[i];
+                int c = route[k];
+                int d = (k+1 == route.size()) ? depot : route[k+1];
+                
+                // Kiểm tra bounds trước khi truy cập dist
+                if (a < 0 || a > maxNode || b < 0 || b > maxNode || 
+                    c < 0 || c > maxNode || d < 0 || d > maxNode) {
+                    continue;
+                }
+                
+                double before = dist[a][b] + dist[c][d];
+                double after = dist[a][c] + dist[b][d];
+                
+                if (after + 1e-9 < before) {
+                    reverse(route.begin() + i, route.begin() + k + 1);
+                    improved = true;
+                }
+                
+                if (improved) break;
+            }
+            if (improved) break;
+        }
+    }
+    return route;
+}
+void repairCustomer(vector<int>& seq, int n, mt19937& gen);
+void repairZero(vector<int>& seq, int vehicle, mt19937& gen);
+void repairCustomerWithLocalSearch(vector<int>& seq, int n, mt19937& gen,
+                                 const vector<vector<double>>& dist, 
+                                 const vector<int>& demand, int capacity, int depot) ;
+// ======= INITIALIZATION METHODS (3) =======
+
+// 1. Random Initialization
+vector<vector<int>> initPopulationRandom(int vehicle, int n, int capacity, const vector<int>& demand, int populationSize = 500) {
+    vector<vector<int>> populationSeq;
+    random_device rd;
+    mt19937 gen(rd());
+    
+    for (int p = 0; p < populationSize; ++p) {
+        vector<int> customers;
+        for (int i = 2; i <= n; ++i) customers.push_back(i);
+        shuffle(customers.begin(), customers.end(), gen);
+        
+        vector<vector<int>> groups;
+        vector<int> currentGroup;
+        int currentLoad = 0;
+        
+        for (int cust : customers) {
+            if (currentLoad + demand[cust] <= capacity) {
+                currentGroup.push_back(cust);
+                currentLoad += demand[cust];
+            } else {
+                groups.push_back(currentGroup);
+                currentGroup = {cust};
+                currentLoad = demand[cust];
+            }
+        }
+        
+        if (!currentGroup.empty()) groups.push_back(currentGroup);
+        while ((int)groups.size() < vehicle) groups.push_back({});
+        
+        vector<int> seq;
+        for (size_t i = 0; i < groups.size(); ++i) {
+            for (int cust : groups[i]) seq.push_back(cust);
+            if (i != groups.size() - 1) seq.push_back(0);
+        }
+        
+        populationSeq.push_back(seq);
+    }
+    
+    return populationSeq;
+}
+
+// 2. Sweep Initialization
+vector<vector<int>> initPopulationSweep(int vehicle, int n, int capacity, const vector<int>& demand, 
+                                      const vector<pair<double, double>>& coords, int depot, int populationSize = 500) {
+    vector<vector<int>> populationSeq;
+    random_device rd;
+    mt19937 gen(rd());
+    uniform_real_distribution<double> prob(0.0, 1.0);
+
+    // Tính tổng demand để tính hệ số tightness
+    int totalDemand = 0;
+    for (int i = 2; i <= n; ++i) {
+        totalDemand += demand[i];
+    }
+    
+    // Tính hệ số tightness: T = TotalDemand / (Vehicle × Capacity)
+    double tightness = (double)totalDemand / (vehicle * capacity);
+    
+    // Lấy tọa độ depot
+    pair<double, double> depotCoords = coords[depot];
+
+    for (int p = 0; p < populationSize; ++p) {
+        // Tạo vector các khách hàng với góc polar
+        vector<pair<int, double>> customers;
+        for (int i = 2; i <= n; ++i) {
+            double angle = polarAngle(depotCoords, coords[i], true);
+            customers.emplace_back(i, angle);
+        }
+
+        // Sắp xếp khách hàng theo góc polar tăng dần (quét quanh depot)
+        sort(customers.begin(), customers.end(), [](const pair<int, double>& a, const pair<int, double>& b) {
+            return a.second < b.second;
+        });
+
+        // Thêm diversity cho các cá thể khác cá thể đầu tiên
+        if (p > 0) {
+            uniform_real_distribution<double> angleDist(0.0, 2 * M_PI);
+            double offsetAngle = angleDist(gen);
+            
+            // Áp dụng offset và normalize lại
+            for (auto& customer : customers) {
+                customer.second += offsetAngle;
+                if (customer.second >= 2 * M_PI) {
+                    customer.second -= 2 * M_PI;
+                }
+            }
+            
+            // Sắp xếp lại sau khi offset
+            sort(customers.begin(), customers.end(), [](const pair<int, double>& a, const pair<int, double>& b) {
+                return a.second < b.second;
+            });
+        }
+
+        // Tạo các routes sử dụng thuật toán Sweep
+        vector<vector<int>> groups;
+        vector<int> currentGroup;
+        int currentLoad = 0;
+        
+        for (const auto& customer : customers) {
+            int custIdx = customer.first;
+            int custDemand = demand[custIdx];
+            
+            if (currentLoad + custDemand <= capacity) {
+                // Khách hàng vừa đúng capacity - thêm vào route hiện tại
+                currentGroup.push_back(custIdx);
+                currentLoad += custDemand;
+            } else {
+                // Khách hàng vượt capacity
+                // Finalize current group
+                if (!currentGroup.empty()) {
+                    groups.push_back(currentGroup);
+                }
+                
+                // Start new group
+                currentGroup = {custIdx};
+                currentLoad = custDemand;
+            }
+        }
+        
+        // Thêm group cuối cùng nếu không rỗng
+        if (!currentGroup.empty()) {
+            groups.push_back(currentGroup);
+        }
+
+        // Đảm bảo số lượng xe đủ
+        while ((int)groups.size() < vehicle) {
+            groups.push_back({});
+        }
+
+        // Chuyển đổi thành sequence với separator 0
+        vector<int> seq;
+        for (size_t i = 0; i < groups.size(); ++i) {
+            for (int cust : groups[i]) {
+                seq.push_back(cust);
+            }
+            if (i != groups.size() - 1) {
+                seq.push_back(0);
+            }
+        }
+        
+        populationSeq.push_back(seq);
+    }
+
+    return populationSeq;
+}
+
+// 3. Cluster-based Initialization
+vector<vector<int>> initPopulationCluster(int vehicle, int n, int capacity, const vector<int>& demand, 
+                                        const vector<pair<double,double>>& coords, int depot, int populationSize = 500) {
+    vector<vector<int>> populationSeq;
+    random_device rd;
+    mt19937 gen(rd());
+    
+    for (int p = 0; p < populationSize; ++p) {
+        // Initialize centroids randomly
+        vector<pair<double,double>> centroids;
+        uniform_real_distribution<> coordDist(0, 100); // Adjust range as needed
+        
+        for (int k = 0; k < vehicle; ++k) {
+            centroids.push_back({coordDist(gen), coordDist(gen)});
+        }
+        
+        // Assign customers to clusters using K-means
+        vector<int> assignment(n+1);
+        for (int iter = 0; iter < 10; ++iter) { // 10 iterations of k-means
+            // Assign customers to nearest centroid
+            for (int i = 2; i <= n; ++i) {
+                double minDist = numeric_limits<double>::max();
+                int bestCluster = 0;
+                
+                for (int k = 0; k < vehicle; ++k) {
+                    double d = euclidDist(coords[i].first, coords[i].second, 
+                                        centroids[k].first, centroids[k].second);
+                    if (d < minDist) { 
+                        minDist = d; 
+                        bestCluster = k;
+                    }
+                }
+                
+                assignment[i] = bestCluster;
+            }
+            
+            // Update centroids
+            vector<double> sumX(vehicle, 0), sumY(vehicle, 0);
+            vector<int> count(vehicle, 0);
+            
+            for (int i = 2; i <= n; ++i) {
+                sumX[assignment[i]] += coords[i].first;
+                sumY[assignment[i]] += coords[i].second;
+                count[assignment[i]]++;
+            }
+            
+            for (int k = 0; k < vehicle; ++k) {
+                if (count[k] > 0) {
+                    centroids[k] = {sumX[k]/count[k], sumY[k]/count[k]};
+                }
+            }
+        }
+        
+        // Create routes from clusters with capacity constraint
+        vector<vector<int>> routes(vehicle);
+        
+        // First, assign customers to their clusters
+        for (int i = 2; i <= n; ++i) {
+            routes[assignment[i]].push_back(i);
+        }
+        
+        // Handle capacity constraints
+        vector<int> seq;
+        for (int k = 0; k < vehicle; ++k) {
+            vector<int> cluster = routes[k];
+            
+            // Sort customers by distance from centroid
+            sort(cluster.begin(), cluster.end(), [&](int a, int b) {
+                double da = euclidDist(coords[a].first, coords[a].second,
+                                     centroids[k].first, centroids[k].second);
+                double db = euclidDist(coords[b].first, coords[b].second,
+                                     centroids[k].first, centroids[k].second);
+                return da < db;
+            });
+            
+            // Create feasible routes
+            int clusterLoad = 0;
+            vector<int> route;
+            
+            for (int customer : cluster) {
+                if (clusterLoad + demand[customer] <= capacity) {
+                    route.push_back(customer);
+                    clusterLoad += demand[customer];
+                } else {
+                    // This customer doesn't fit, add to next vehicle
+                    if (k+1 < vehicle) {
+                        routes[k+1].push_back(customer);
+                    } else {
+                        // No more vehicles, just add at the end and repair later
+                        route.push_back(customer);
+                    }
+                }
+            }
+            
+            // Add route to sequence
+            for (int customer : route) {
+                seq.push_back(customer);
+            }
+            
+            if (k < vehicle - 1) {
+                seq.push_back(0); // Separator
+            }
+        }
+        
+        populationSeq.push_back(seq);
+    }
+    
+    return populationSeq;
+}
+
+// ======= HYBRID INITIALIZATION =======
+vector<vector<int>> initStructuredPopulation(int populationSize, int vehicle, int n, int capacity, const vector<int>& demand, const vector<pair<double,double>>& coords, const vector<vector<double>>& dist, int depot) {
+    random_device rd;
+    mt19937 gen(rd());
+    
+    // Calculate tightness factor
+    int totalDemand = 0;
+    for (int i = 2; i <= n; ++i) totalDemand += demand[i];
+    double tightness = (double)totalDemand / (vehicle * capacity);
+    
+    // Distribution: 40% sweep-based, 30% random, 30% cluster-based
+    int sweepCount = (int)(populationSize * 0.4);
+    int randomCount = (int)(populationSize * 0.3);
+    int clusterCount = populationSize - sweepCount - randomCount;
+    
+    cout << " Population distribution: Sweep=" << sweepCount 
+         << ", Random=" << randomCount 
+         << ", Cluster=" << clusterCount << endl;
+    
+    vector<vector<int>> population;
+    
+    // 1. Create sweep-based solutions with 2-opt improvement
+    for (int p = 0; p < sweepCount; ++p) {
+        // Get depot coordinates
+        pair<double, double> depotCoords = coords[depot];
+        
+        // Calculate polar angles for all customers
+        vector<pair<int, double>> customers;
+        for (int i = 2; i <= n; ++i) {
+            double angle = polarAngle(depotCoords, coords[i], true);
+            customers.emplace_back(i, angle);
+        }
+        
+        // Add randomization with different starting angles
+        uniform_real_distribution<double> angleDist(0.0, 2 * M_PI);
+        double startAngle = angleDist(gen);
+        
+        // Apply offset and normalize
+        for (auto& customer : customers) {
+            customer.second = fmod(customer.second + startAngle, 2 * M_PI);
+        }
+        
+        // Sort by angle
+        sort(customers.begin(), customers.end(), 
+             [](const auto& a, const auto& b) { return a.second < b.second; });
+        
+        // Create routes using sweep
+        vector<vector<int>> routes;
+        vector<int> currentRoute;
+        int currentLoad = 0;
+        
+        for (const auto& customer : customers) {
+    int custId = customer.first;
+    double angle = customer.second;
+    
+    if (currentLoad + demand[custId] <= capacity) {
+        currentRoute.push_back(custId);
+        currentLoad += demand[custId];
+    } else {
+        if (!currentRoute.empty()) {
+            // Apply 2-opt improvement to the route
+            currentRoute = twoOptImproveCustomers(currentRoute, dist, depot, 30);
+            routes.push_back(currentRoute);
+        }
+        currentRoute = {custId};
+        currentLoad = demand[custId];
+    }
+}
+        
+        if (!currentRoute.empty()) {
+            currentRoute = twoOptImproveCustomers(currentRoute, dist, depot, 30);
+            routes.push_back(currentRoute);
+        }
+        
+        // Convert to sequence with separators
+        vector<int> seq;
+        for (size_t i = 0; i < routes.size(); ++i) {
+            for (int cust : routes[i]) seq.push_back(cust);
+            if (i < routes.size() - 1) seq.push_back(0);
+        }
+        
+        while ((int)routes.size() < vehicle) {
+            if (!seq.empty() && seq.back() != 0) seq.push_back(0);
+            seq.push_back(0); // Add empty route
+        }
+        
+        repairCustomer(seq, n, gen);
+        repairZero(seq, vehicle, gen);
+        population.push_back(seq);
+    }
+    
+    // 2. Add random solutions
+    vector<vector<int>> randomPop = initPopulationRandom(vehicle, n, capacity, demand, randomCount);
+    population.insert(population.end(), randomPop.begin(), randomPop.end());
+    
+    // 3. Add cluster-based solutions with improvements
+    vector<vector<int>> clusterPop = initPopulationCluster(vehicle, n, capacity, demand, coords, depot, clusterCount);
+    
+    // Apply 2-opt to cluster solutions
+    for (auto& seq : clusterPop) {
+        vector<vector<int>> routes = decodeSeq(seq, depot);
+        for (auto& route : routes) {
+            if (route.size() <= 2) continue;
+            vector<int> customers(route.begin()+1, route.end()-1);
+            customers = twoOptImproveCustomers(customers, dist, depot, 30);
+            route = {depot};
+            route.insert(route.end(), customers.begin(), customers.end());
+            route.push_back(depot);
+        }
+        
+        // Convert back to sequence
+        seq.clear();
+        for (size_t i = 0; i < routes.size(); ++i) {
+            for (size_t j = 1; j < routes[i].size()-1; ++j) {
+                seq.push_back(routes[i][j]);
+            }
+            if (i < routes.size() - 1) seq.push_back(0);
+        }
+        repairCustomer(seq, n, gen);
+        repairZero(seq, vehicle, gen);
+    }
+    
+    population.insert(population.end(), clusterPop.begin(), clusterPop.end());
+    cout << "Generated " << population.size() << " individuals with improved methods" << endl;
+    return population;
+}
+
+// ======= REPAIR OPERATORS =======
+
+void repairZero(vector<int>& seq, int vehicle, mt19937& gen) {
+    // Bước 1: Xóa các số 0 liền nhau
+    for (auto it = seq.begin(); it != seq.end(); ) {
+        if (*it == 0 && (it + 1) != seq.end() && *(it + 1) == 0) {
+            // Nếu số hiện tại là 0 và số tiếp theo cũng là 0, xóa số hiện tại
+            it = seq.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    
+    // Bước 2: Xóa số 0 ở đầu chuỗi
+    while (!seq.empty() && seq.front() == 0) {
+        seq.erase(seq.begin());
+    }
+    
+    // Bước 3: Xóa số 0 ở cuối chuỗi
+    while (!seq.empty() && seq.back() == 0) {
+        seq.pop_back();
+    }
+    
+    int zeroCount = count(seq.begin(), seq.end(), 0);
+    int needZero = max(0, vehicle - 1);
+    
+    if (zeroCount == needZero) {
+        return;  // Không cần sửa
+    }
+    
+    // Trích xuất các tuyến từ chuỗi
+    vector<vector<int>> routes;
+    vector<int> currentRoute;
+    
+    for (int v : seq) {
+        if (v == 0) {
+            if (!currentRoute.empty()) {
+                routes.push_back(currentRoute);
+                currentRoute.clear();
+            }
+        } 
+        else {
+            currentRoute.push_back(v);
+        }
+    }
+    
+    if (!currentRoute.empty()) {
+        routes.push_back(currentRoute);
+    }
+    
+    // Trường hợp 1: Quá nhiều số 0 - xóa từ tuyến ngắn nhất
+    while (zeroCount > needZero && routes.size() > 1) {
+        // Tìm tuyến ngắn nhất
+        int shortestIdx = 0;
+        size_t minLength = routes[0].size();
+        
+        for (size_t i = 1; i < routes.size(); ++i) {
+            if (routes[i].size() < minLength) {
+                minLength = routes[i].size();
+                shortestIdx = i;
+            }
+        }
+        
+        // Hợp nhất tuyến ngắn nhất với tuyến tiếp theo
+        if (shortestIdx + 1 < routes.size()) {
+            routes[shortestIdx + 1].insert(routes[shortestIdx + 1].begin(), 
+                                          routes[shortestIdx].begin(), 
+                                          routes[shortestIdx].end());
+            routes.erase(routes.begin() + shortestIdx);
+        } else {
+            // Nếu là tuyến cuối, hợp nhất với tuyến trước đó
+            routes[shortestIdx - 1].insert(routes[shortestIdx - 1].end(), 
+                                         routes[shortestIdx].begin(), 
+                                         routes[shortestIdx].end());
+            routes.erase(routes.begin() + shortestIdx);
+        }
+        
+        zeroCount--;
+    }
+    
+    // Trường hợp 2: Quá ít số 0 - thêm vào tuyến dài nhất
+    while (zeroCount < needZero) {
+        if (routes.empty()) {
+            // Trường hợp đặc biệt: không có tuyến nào
+            routes.push_back({});
+            routes.push_back({});
+            zeroCount++;
+            continue;
+        }
+        
+        // Tìm tuyến dài nhất
+        int longestIdx = 0;
+        size_t maxLength = routes[0].size();
+        
+        for (size_t i = 1; i < routes.size(); ++i) {
+            if (routes[i].size() > maxLength) {
+                maxLength = routes[i].size();
+                longestIdx = i;
+            }
+        }
+        
+        if (maxLength <= 1) {
+            // Tất cả tuyến đều rất ngắn, thêm một tuyến trống
+            routes.push_back({});
+        } else {
+            // Chia tuyến dài nhất thành hai nửa
+            int splitPoint = routes[longestIdx].size() / 2;
+            vector<int> firstHalf(routes[longestIdx].begin(), 
+                                 routes[longestIdx].begin() + splitPoint);
+            vector<int> secondHalf(routes[longestIdx].begin() + splitPoint, 
+                                  routes[longestIdx].end());
+            
+            routes[longestIdx] = firstHalf;
+            routes.insert(routes.begin() + longestIdx + 1, secondHalf);
+        }
+        
+        zeroCount++;
+    }
+    
+    // Chuyển đổi lại sang định dạng chuỗi
+    seq.clear();
+    for (size_t i = 0; i < routes.size(); ++i) {
+        for (int v : routes[i]) {
+            seq.push_back(v);
+        }
+        if (i < routes.size() - 1) {
+            seq.push_back(0);  // Thêm dấu phân cách giữa các tuyến
+        }
+    }
+}
+
+// Simple and robust repairCustomer function
+void repairCustomer(vector<int>& seq, int n, mt19937& gen) {
+    // Extract only non-zero customers
+    vector<int> customers;
+    for (int v : seq) {
+        if (v != 0 && v >= 2 && v <= n) {
+            customers.push_back(v);
+        }
+    }
+    
+    // Create a set to check what customers we have
+    set<int> present;
+    for (int cust : customers) {
+        present.insert(cust);
+    }
+    
+    // Find missing customers
+    vector<int> missing;
+    for (int i = 2; i <= n; ++i) {
+        if (present.find(i) == present.end()) {
+            missing.push_back(i);
+        }
+    }
+    
+    // If we have the right number of unique customers, we're done
+    if (missing.empty() && present.size() == n - 1) {
+        return; // Already valid
+    }
+    
+    // Rebuild customer list: take one of each present customer + all missing
+    vector<int> validCustomers;
+    for (int i = 2; i <= n; ++i) {
+        validCustomers.push_back(i);
+    }
+    
+    // Replace customer part in sequence
+    vector<int> newSeq;
+    int customerIdx = 0;
+    
+    for (int v : seq) {
+        if (v == 0) {
+            newSeq.push_back(0);
+        } else {
+            // Replace with next valid customer
+            if (customerIdx < validCustomers.size()) {
+                newSeq.push_back(validCustomers[customerIdx]);
+                customerIdx++;
+            }
+        }
+    }
+    
+    // Add any remaining customers at the end
+    while (customerIdx < validCustomers.size()) {
+        newSeq.push_back(validCustomers[customerIdx]);
+        customerIdx++;
+    }
+    
+    seq = newSeq;
+}
+void repairCustomerWithLocalSearch(vector<int>& seq, int n, mt19937& gen,
+                                 const vector<vector<double>>& dist, 
+                                 const vector<int>& demand, int capacity, int depot) {
+    // Bước 1: Sử dụng hàm repairCustomer để sửa duplicate và missing customers
+    repairCustomer(seq, n, gen);
+    
+    // Bước 2: Áp dụng 2-opt local search cho từng route
+    vector<vector<int>> routes = decodeSeq(seq, depot);
+    
+    for (auto& route : routes) {
+        if (route.size() <= 3) continue; // Bỏ qua route quá ngắn (chỉ có depot)
+        
+        // Trích xuất customers từ route (bỏ depot đầu và cuối)
+        vector<int> customers;
+        for (size_t i = 1; i < route.size() - 1; ++i) {
+            customers.push_back(route[i]);
+        }
+        
+        // Áp dụng 2-opt improvement
+        customers = twoOptImproveCustomers(customers, dist, depot, 50);
+        
+        // Cập nhật lại route với customers đã được cải thiện
+        route = {depot};
+        route.insert(route.end(), customers.begin(), customers.end());
+        route.push_back(depot);
+    }
+    
+    // Bước 3: Chuyển đổi lại thành sequence format
+    seq.clear();
+    for (size_t i = 0; i < routes.size(); ++i) {
+        // Thêm customers từ route (bỏ depot đầu và cuối)
+        for (size_t j = 1; j < routes[i].size() - 1; ++j) {
+            seq.push_back(routes[i][j]);
+        }
+        // Thêm separator giữa các routes (trừ route cuối)
+        if (i < routes.size() - 1) {
+            seq.push_back(0);
+        }
+    }
+}
+
+// ======= CROSSOVER OPERATORS (3) =======
+
+// Helper for sequence conversion
+// vector<int> convertToSequenceFormat(const vector<int>& customers, int vehicle, const vector<int>& demand, int capacity, mt19937& gen) {
+//     vector<int> seq;
+//     vector<vector<int>> routes;
+//     vector<int> currentRoute;
+//     int currentLoad = 0;
+    
+//     for (int customer : customers) {
+//         if (currentLoad + demand[customer] <= capacity) {
+//             currentRoute.push_back(customer);
+//             currentLoad += demand[customer];
+//         } else {
+//             if (!currentRoute.empty()) routes.push_back(currentRoute);
+//             currentRoute = {customer};
+//             currentLoad = demand[customer];
+//         }
+//     }
+    
+//     if (!currentRoute.empty()) routes.push_back(currentRoute);
+    
+//     // Ensure we don't exceed vehicle count
+//     while (routes.size() > (size_t)vehicle) {
+//         vector<int> lastRoute = routes.back();
+//         routes.pop_back();
+//         bool merged = false;
+        
+//         for (auto& route : routes) {
+//             int routeLoad = 0;
+//             for (int c : route) routeLoad += demand[c];
+            
+//             int lastRouteLoad = 0;
+//             for (int c : lastRoute) lastRouteLoad += demand[c];
+            
+//             if (routeLoad + lastRouteLoad <= capacity) {
+//                 route.insert(route.end(), lastRoute.begin(), lastRoute.end());
+//                 merged = true;
+//                 break;
+//             }
+//         }
+        
+//         if (!merged && !routes.empty()) {
+//             // If can't merge, just append to first route
+//             routes[0].insert(routes[0].end(), lastRoute.begin(), lastRoute.end());
+//         }
+//     }
+    
+//     // Convert routes to sequence
+//     for (size_t i = 0; i < routes.size(); ++i) {
+//         for (int customer : routes[i]) seq.push_back(customer);
+//         if (i < routes.size() - 1) seq.push_back(0);
+//     }
+    
+//     return seq;
+// }
+
+// 1. One-Point Crossover
+pair<vector<int>, vector<int>> crossoverOnePoint(const vector<int>& parent1, const vector<int>& parent2, 
+                                              int n, int vehicle, const vector<int>& demand, 
+                                              int capacity, int depot, mt19937& gen,
+                                              const vector<vector<double>>& dist) {
+    int len1 = parent1.size();
+    int len2 = parent2.size();
+    int len = min(len1, len2);
+    
+    if (len < 2) {
+        return {parent1, parent2}; // Can't crossover, return parents
+    }
+    
+    uniform_int_distribution<> dis(1, len - 1);
+    int cut = dis(gen);
+    
+    vector<int> child1, child2;
+    
+    child1.insert(child1.end(), parent1.begin(), parent1.begin() + cut);
+    child1.insert(child1.end(), parent2.begin() + cut, parent2.end());
+    
+    child2.insert(child2.end(), parent2.begin(), parent2.begin() + cut);
+    child2.insert(child2.end(), parent1.begin() + cut, parent1.end());
+
+    repairCustomerWithLocalSearch(child1, n, gen, dist, demand, capacity, depot);
+    repairZero(child1, vehicle, gen);
+
+    repairCustomerWithLocalSearch(child2, n, gen, dist, demand, capacity, depot);
+    repairZero(child2, vehicle, gen);
+
+    return {child1, child2};
+}
+
+// 2. Order Crossover (OX)
+pair<vector<int>, vector<int>> crossoverOX(const vector<int>& parent1, const vector<int>& parent2, 
+                                        int n, int vehicle, const vector<int>& demand, 
+                                        int capacity, int depot, mt19937& gen, const vector<vector<double>>& dist) {
+    // Bước 1: Trích xuất customers (bỏ hết số 0)
+    vector<int> customers1, customers2;
+    for (int v : parent1) if (v != 0) customers1.push_back(v);
+    for (int v : parent2) if (v != 0) customers2.push_back(v);
+    
+    if (customers1.empty() || customers2.empty()) {
+        return {parent1, parent2};
+    }
+    
+    int minLen = min(customers1.size(), customers2.size());
+    if (minLen < 2) {
+        return {parent1, parent2};
+    }
+    
+    // Bước 2: Lai ghép OX trên customer list
+    uniform_int_distribution<> dis(0, minLen - 1);
+    int cut1 = dis(gen);
+    int cut2 = dis(gen);
+    if (cut1 > cut2) swap(cut1, cut2);
+    
+    vector<int> child1Customers(customers1.size(), -1);
+    vector<int> child2Customers(customers2.size(), -1);
+    set<int> used1, used2;
+    
+    // Copy đoạn giữa
+    for (int i = cut1; i <= cut2 && i < minLen; ++i) {
+        child1Customers[i] = customers1[i];
+        child2Customers[i] = customers2[i];
+        used1.insert(customers1[i]);
+        used2.insert(customers2[i]);
+    }
+    
+    // Fill phần còn lại
+    int pos1 = 0, pos2 = 0;
+    for (int cust : customers2) {
+        if (used1.find(cust) == used1.end()) {
+            while (pos1 < (int)child1Customers.size() && child1Customers[pos1] != -1) pos1++;
+            if (pos1 < (int)child1Customers.size()) child1Customers[pos1] = cust;
+        }
+    }
+    for (int cust : customers1) {
+        if (used2.find(cust) == used2.end()) {
+            while (pos2 < (int)child2Customers.size() && child2Customers[pos2] != -1) pos2++;
+            if (pos2 < (int)child2Customers.size()) child2Customers[pos2] = cust;
+        }
+    }
+    
+    // Bước 3: Chèn vehicle-1 số 0 ngẫu nhiên
+    vector<int> child1 = child1Customers;
+    vector<int> child2 = child2Customers;
+    
+    int zerosToAdd = vehicle - 1;
+    uniform_int_distribution<> posDis1(0, child1.size());
+    uniform_int_distribution<> posDis2(0, child2.size());
+    
+    for (int i = 0; i < zerosToAdd; ++i) {
+        child1.insert(child1.begin() + posDis1(gen), 0);
+        child2.insert(child2.begin() + posDis2(gen), 0);
+        posDis1 = uniform_int_distribution<>(0, child1.size());
+        posDis2 = uniform_int_distribution<>(0, child2.size());
+    }
+    
+    // Repair customers first, then zeros
+    repairCustomerWithLocalSearch(child1, n, gen, dist, demand, capacity, depot);
+    repairZero(child1, vehicle, gen);
+    repairCustomerWithLocalSearch(child2, n, gen, dist, demand, capacity, depot);
+    repairZero(child2, vehicle, gen);
+    
+    return {child1, child2};
+}
+
+// 3. Partially Mapped Crossover (PMX)
+pair<vector<int>, vector<int>> crossoverPMX(const vector<int>& parent1, const vector<int>& parent2,
+                                         int n, int vehicle, const vector<int>& demand,
+                                         int capacity, int depot, mt19937& gen, const vector<vector<double>>& dist) {
+    // Bước 1: Trích xuất customers (bỏ hết số 0)
+    vector<int> customers1, customers2;
+    for (int v : parent1) if (v != 0) customers1.push_back(v);
+    for (int v : parent2) if (v != 0) customers2.push_back(v);
+    
+    if (customers1.empty() || customers2.empty()) {
+        return {parent1, parent2};
+    }
+    
+    int minLen = min(customers1.size(), customers2.size());
+    if (minLen < 2) {
+        return {parent1, parent2};
+    }
+    
+    // Bước 2: Lai ghép PMX trên customer list
+    uniform_int_distribution<> dis(0, minLen - 1);
+    int cut1 = dis(gen);
+    int cut2 = dis(gen);
+    if (cut1 > cut2) swap(cut1, cut2);
+    
+    vector<int> child1 = customers1;
+    vector<int> child2 = customers2;
+    
+    // Tạo mapping và swap đoạn giữa
+    map<int, int> mapping1to2, mapping2to1;
+    for (int i = cut1; i <= cut2 && i < minLen; ++i) {
+        mapping1to2[customers1[i]] = customers2[i];  
+        mapping2to1[customers2[i]] = customers1[i];
+        child1[i] = customers2[i];
+        child2[i] = customers1[i];
+    }
+    
+    // Áp dụng mapping để tránh duplicate
+    for (int i = 0; i < minLen; ++i) {
+        if (i < cut1 || i > cut2) {
+            // Fix child1
+            int val = child1[i];
+            while (mapping1to2.find(val) != mapping1to2.end()) {
+                val = mapping1to2[val];
+            }
+            child1[i] = val;
+            
+            // Fix child2
+            val = child2[i];
+            while (mapping2to1.find(val) != mapping2to1.end()) {
+                val = mapping2to1[val];
+            }
+            child2[i] = val;
+        }
+    }
+    
+    // Bước 3: Chèn vehicle-1 số 0 ngẫu nhiên
+    int zerosToAdd = vehicle - 1;
+    uniform_int_distribution<> posDis1(0, child1.size());
+    uniform_int_distribution<> posDis2(0, child2.size());
+    
+    for (int i = 0; i < zerosToAdd; ++i) {
+        child1.insert(child1.begin() + posDis1(gen), 0);
+        child2.insert(child2.begin() + posDis2(gen), 0);
+        posDis1 = uniform_int_distribution<>(0, child1.size());
+        posDis2 = uniform_int_distribution<>(0, child2.size());
+    }
+    
+    // Repair zeros to ensure valid format
+    repairZero(child1, vehicle, gen);
+    repairCustomerWithLocalSearch(child1, n, gen, dist, demand, capacity, depot);
+    repairZero(child2, vehicle, gen);
+    repairCustomerWithLocalSearch(child2, n, gen, dist, demand, capacity, depot);
+
+    return {child1, child2};
+}
+
+// ======= MUTATION OPERATOR =======
+
+void mutate(vector<int>& seq, int n, int vehicle, const vector<int>& demand, 
+           int capacity, mt19937& gen, const vector<vector<double>>& dist, int depot) {
+    // Increased mutation rate from 0.15 to 0.30
+    uniform_real_distribution<> prob(0.0, 1.0);
+    
+    if (prob(gen) < 0.30) { // 30% mutation rate
+        if (seq.size() < 2) return;
+        
+        uniform_int_distribution<> posDis(0, (int)seq.size()-1);
+        int i = posDis(gen);
+        int j = posDis(gen);
+        int tries = 0;
+        
+        // Find two non-zero positions to swap
+        while ((seq[i] == 0 || seq[j] == 0 || i == j) && tries < 100) {
+            i = posDis(gen);
+            j = posDis(gen);
+            ++tries;
+        }
+        
+        if (i != j && seq[i] != 0 && seq[j] != 0) {
+            swap(seq[i], seq[j]);
+        } else {
+            // fallback: relocate one customer to random non-zero position
+            if (seq.size() > 2) {
+                for (int t = 0; t < 3; ++t) {
+                    int src = posDis(gen);
+                    if (seq[src] == 0) continue;
+                    int dst = posDis(gen);
+                    if (seq[dst] == 0) continue;
+                    if (src != dst) {
+                        int val = seq[src];
+                        seq.erase(seq.begin() + src);
+                        seq.insert(seq.begin() + dst, val);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    
+    repairCustomerWithLocalSearch(seq, n, gen, dist, demand, capacity, depot);
+    repairZero(seq, vehicle, gen);
+}
+
+// ======= FEASIBILITY TRACKING =======
+
+struct FeasibleSolution {
+    vector<int> sequence;
+    double cost;
+    int generation;
+    bool isFeasible;
+    
+    FeasibleSolution() : cost(numeric_limits<double>::max()), generation(-1), isFeasible(false) {}
+    
+    FeasibleSolution(const vector<int>& seq, double c, int gen, bool feasible) 
+        : sequence(seq), cost(c), generation(gen), isFeasible(feasible) {}
+};
+
+// Hàm lấy feasible solution tốt nhất từ một generation
+FeasibleSolution getBestFeasibleFromGeneration(const vector<vector<int>>& population,
+                                             const vector<pair<double, int>>& fitnessIndex,
+                                             const vector<int>& demand,
+                                             int capacity, int depot, int generation) {
+    
+    FeasibleSolution bestFeasible;
+    int feasibleCount = 0;
+    
+    // Duyệt population theo thứ tự fitness tốt nhất trước
+    for (const auto& entry : fitnessIndex) {
+        double fitness = entry.first;
+        int index = entry.second;
+        const vector<int>& individual = population[index];
+        
+        // Kiểm tra feasibility
+        bool isFeasible = validateCapacity(individual, demand, capacity, depot);
+        
+        if (isFeasible) {
+            feasibleCount++;
+            // Nếu đây là feasible solution tốt nhất cho đến nay
+            if (fitness < bestFeasible.cost) {
+                bestFeasible = FeasibleSolution(individual, fitness, generation, true);
+            }
+        }
+    }
+    
+    // Log thông tin mỗi 10 generations
+    if (generation % 10 == 0 || generation == 1) {
+        cout << "   Generation " << generation << ": " << feasibleCount << "/" 
+             << population.size() << " feasible solutions" << endl;
+        
+        if (bestFeasible.isFeasible) {
+            cout << "   Best feasible cost: " << bestFeasible.cost << endl;
+        }
+    }
+    
+    return bestFeasible;
+}
+
+// Hàm update global best feasible
+void updateGlobalBestFeasible(FeasibleSolution& globalBest, const FeasibleSolution& candidate) {
+    if (candidate.isFeasible && candidate.cost < globalBest.cost) {
+        globalBest = candidate;
+        cout << " NEW GLOBAL BEST FEASIBLE: " << candidate.cost 
+             << " (generation " << candidate.generation << ")" << endl;
+    }
+}
+
+// ======= SOLUTION DISPLAY =======
+
+void displaySolution(const vector<int>& sequence, const vector<pair<double,double>>& coords,
+                    const vector<int>& demand, int capacity, int depot, 
+                    const vector<vector<double>>& dist) {
+    
+    if (sequence.empty()) {
+        cout << "Empty solution!" << endl;
+        return;
+    }
+    
+    vector<vector<int>> routes = decodeSeq(sequence, depot);
+    double totalCost = 0;
+    int totalVehicles = routes.size();
+    bool allFeasible = true;
+    
+    cout << "Number of vehicles used: " << totalVehicles << endl;
+    cout << "Vehicle capacity: " << capacity << endl;
+    cout << "\nRoute details:" << endl;
+    
+    for (size_t i = 0; i < routes.size(); ++i) {
+        // Calculate route demand
+        int routeDemand = 0;
+        for (size_t j = 1; j < routes[i].size() - 1; j++) {
+            routeDemand += demand[routes[i][j]];
+        }
+        
+        // Calculate route cost
+        double routeCost = 0;
+        for (size_t j = 0; j < routes[i].size() - 1; j++) {
+            int from = routes[i][j];
+            int to = routes[i][j+1];
+            routeCost += dist[from][to];
+        }
+        
+        cout << "Route " << (i + 1) << ": ";
+        for (int v : routes[i]) cout << v << " ";
+        cout << "| Cost: " << fixed << setprecision(2) << routeCost;
+        cout << " | Demand: " << routeDemand << "/" << capacity;
+        
+        if (routeDemand > capacity) {
+            cout << "  VIOLATION!";
+            allFeasible = false;
+        } else {
+            cout << " ";
+        }
+        cout << endl;
+        
+        totalCost += routeCost;
+    }
+    
+    cout << "\n SUMMARY:" << endl;
+    cout << "Total cost: " << fixed << setprecision(2) << totalCost << endl;
+    cout << "Total vehicles: " << totalVehicles << endl;
+    cout << "Solution status: " << (allFeasible ? "FEASIBLE" : "INFEASIBLE") << endl;
+    
+    if (allFeasible) {
+        // Calculate utilization
+        int totalDemandServed = 0;
+        for (size_t i = 0; i < routes.size(); i++) {
+            for (size_t j = 1; j < routes[i].size() - 1; j++) {
+                totalDemandServed += demand[routes[i][j]];
+            }
+        }
+        double utilization = (double)totalDemandServed / (totalVehicles * capacity) * 100;
+        cout << "Vehicle utilization: " << fixed << setprecision(1) << utilization << "%" << endl;
+    }
+}
+
+// ======= GENETIC ALGORITHM =======
+
+vector<vector<int>> newGeneration(const vector<vector<int>>& population, int depot, 
+                                 const vector<vector<double>>& dist, int n, int vehicle, 
+                                 const vector<int>& demand, int capacity, const vector<pair<double,double>>& coords) {
+    
+    // Calculate fitness once
+    vector<pair<double, int>> fitnessIndex;
+    fitnessIndex.reserve(population.size());
+    
+    for(size_t i = 0; i < population.size(); i++){
+        double fitness = calculateFitness(population[i], coords, demand, capacity, depot);
+        fitnessIndex.push_back({fitness, (int)i});
+    }
+    sort(fitnessIndex.begin(), fitnessIndex.end());
+    
+    vector<vector<int>> newGen;
+    int popSize = population.size();
+    
+    // Calculate number of individuals for each category
+    int bestParentCount = max(1, (int)(popSize * 0.15)); // 15% best parents
+    int randomParentCount = max(1, (int)(popSize * 0.15)); // 15% random parents
+    int childrenCount = popSize - bestParentCount - randomParentCount; // ~70% children
+    
+    // 1. Keep best parents (15%)
+    for (int i = 0; i < bestParentCount && i < (int)fitnessIndex.size(); ++i) {
+        newGen.push_back(population[fitnessIndex[i].second]);
+    }
+    
+    // 2. Add random parents (15%)
+    vector<int> remainingIndices;
+    for (size_t i = bestParentCount; i < fitnessIndex.size(); ++i) {
+        remainingIndices.push_back(fitnessIndex[i].second);
+    }
+    shuffle(remainingIndices.begin(), remainingIndices.end(), mt19937(random_device{}()));
+    
+    for (int i = 0; i < randomParentCount && i < (int)remainingIndices.size(); ++i) {
+        newGen.push_back(population[remainingIndices[i]]);
+    }
+    
+    // 3. Prepare parent pool for crossover (use both best and random parents)
+    vector<vector<int>> parentPool;
+    // Add all best parents to the pool
+    for (int i = 0; i < bestParentCount && i < (int)fitnessIndex.size(); ++i) {
+        parentPool.push_back(population[fitnessIndex[i].second]);
+    }
+    // Add some random parents to ensure diversity
+    for (int i = 0; i < min(10, (int)remainingIndices.size()); ++i) {
+        parentPool.push_back(population[remainingIndices[i]]);
+    }
+    
+    // 4. Generate children through crossover
+    random_device rd;
+    mt19937 gen(rd());
+    uniform_int_distribution<> parentDis(0, max(0, (int)parentPool.size()-1));
+    uniform_real_distribution<> crossoverChoice(0.0, 1.0);
+    uniform_real_distribution<> mutProb(0.0, 1.0);
+    
+    int childrenCreated = 0;
+    
+    while (childrenCreated < childrenCount && parentPool.size() >= 2) {
+        // Select two different parents
+        int idx1 = parentDis(gen);
+        int idx2 = parentDis(gen);
+        
+        // Ensure parents are different
+        int attempts = 0;
+        while (idx2 == idx1 && parentPool.size() > 1 && attempts < 10) {
+            idx2 = parentDis(gen);
+            attempts++;
+        }
+        
+        // Choose crossover operator
+        pair<vector<int>, vector<int>> childPair;
+        double choice = crossoverChoice(gen);
+        
+        if (choice < 0.33) {
+            childPair = crossoverOnePoint(parentPool[idx1], parentPool[idx2], 
+                                         n, vehicle, demand, capacity, depot, gen, dist);
+        } else if (choice < 0.67) {
+            childPair = crossoverOX(parentPool[idx1], parentPool[idx2], 
+                                   n, vehicle, demand, capacity, depot, gen, dist);
+        } else {
+            childPair = crossoverPMX(parentPool[idx1], parentPool[idx2], 
+                                    n, vehicle, demand, capacity, depot, gen, dist );
+        }
+        
+        // Apply mutation with 20% probability
+        if (mutProb(gen) < 0.2) {
+            mutate(childPair.first, n, vehicle, demand, capacity, gen, dist, depot);
+        }
+        
+        if (mutProb(gen) < 0.2) {
+            mutate(childPair.second, n, vehicle, demand, capacity, gen, dist, depot);
+        }
+        
+        // Add children to new population
+        newGen.push_back(childPair.first);
+        childrenCreated++;
+        
+        if (childrenCreated < childrenCount) {
+            newGen.push_back(childPair.second);
+            childrenCreated++;
+        }
+    }
+    
+    // In case we couldn't create enough children
+    while (newGen.size() < popSize) {
+        int randIdx = uniform_int_distribution<>(0, parentPool.size()-1)(gen);
+        vector<int> individual = parentPool[randIdx];
+        
+        // Apply strong mutation to ensure diversity
+        mutate(individual, n, vehicle, demand, capacity, gen, dist, depot);
+        
+        newGen.push_back(individual);
+    }
+    
+    return newGen;
+}
+double globalBestCost;
+FeasibleSolution globalBestFeasible;
+struct GAResult {
+    int vehiclesUsed;
+    double bestCost;
+    bool isFeasible;
+    vector<int> bestSequence;
+};
+
+GAResult runGA(int maxGenerations, int vehicle, int n, int capacity, int depot, 
+          const vector<pair<double,double>>& coords, const vector<int>& demand) {
+    
+    cout << "\n STARTING GENETIC ALGORITHM..." << endl;
+    cout << "   Problem: " << n-1 << " customers, " << vehicle << " vehicles, capacity " << capacity << endl;
+    cout << "   Running for " << maxGenerations << " generations" << endl;
+    
+    vector<vector<double>> dist = buildDist(coords);
+    int populationSize = 500;
+    
+    // Use the enhanced structured initialization
+    vector<vector<int>> population = initStructuredPopulation(populationSize, vehicle, n, capacity, demand, coords, dist, depot);
+    
+    // Repair initial population
+    random_device rd;
+    mt19937 gen(rd());
+    
+    for (auto& seq : population) {
+        repairCustomerWithLocalSearch(seq, n, gen, dist, demand, capacity, depot);
+        repairZero(seq, vehicle, gen);
+    }
+    
+    // Initialize tracking variables
+    double globalBestCost = numeric_limits<double>::max();
+    vector<int> globalBestCostIndividual;
+    FeasibleSolution globalBestFeasible;
+    int stagnationCount = 0;
+    
+    cout << "\n🏁 EVOLUTION PROGRESS:" << endl;
+    
+    for (int generation = 1; generation <= maxGenerations; generation++) {
+        // Calculate fitness
+        vector<pair<double, int>> fitnessIndex;
+        for (size_t i = 0; i < population.size(); ++i) {
+            double fitness = calculateFitness(population[i], coords, demand, capacity, depot);
+            fitnessIndex.push_back({fitness, (int)i});
+        }
+        sort(fitnessIndex.begin(), fitnessIndex.end());
+        
+        // Get best solution in this generation
+        double bestCostInGen = fitnessIndex[0].first;
+        int bestIdxInGen = fitnessIndex[0].second;
+        
+        // Update global best (may be infeasible)
+        if (bestCostInGen < globalBestCost) {
+            globalBestCost = bestCostInGen;
+            globalBestCostIndividual = population[bestIdxInGen];
+            stagnationCount = 0;
+            
+            cout << "Generation " << generation << ": New global best cost = " << bestCostInGen;
+            if (validateCapacity(globalBestCostIndividual, demand, capacity, depot)) {
+                cout << " FEASIBLE";
+            } else {
+                cout << " INFEASIBLE";
+            }
+            cout << endl;
+        } else {
+            ++stagnationCount;
+            if (generation % 10 == 0) {
+                cout << "Generation " << generation << ": Best = " << bestCostInGen 
+                     << ", Global = " << globalBestCost << ", No improvement for " 
+                     << stagnationCount << " generations" << endl;
+            }
+        }
+        
+        // Update best feasible solution
+        FeasibleSolution bestFeasibleInGen = getBestFeasibleFromGeneration(
+            population, fitnessIndex, demand, capacity, depot, generation);
+        updateGlobalBestFeasible(globalBestFeasible, bestFeasibleInGen);
+        
+        // Create next generation
+        if (generation < maxGenerations) {
+            population = newGeneration(population, depot, dist, n, vehicle, demand, capacity, coords);
+        }
+    }
+    
+    // Final results
+    cout << "\n==== FINAL RESULTS ====" << endl;
+    cout << "Best solution cost: " << globalBestCost;
+    bool globalBestIsFeasible = validateCapacity(globalBestCostIndividual, demand, capacity, depot);
+    cout << (globalBestIsFeasible ? " FEASIBLE" : "  INFEASIBLE") << endl;
+    
+    GAResult result;
+    
+    if (globalBestFeasible.isFeasible) {
+        vector<vector<int>> routes = decodeSeq(globalBestFeasible.sequence, depot);
+        result.vehiclesUsed = routes.size();
+        result.bestCost = globalBestFeasible.cost;
+        result.isFeasible = true;
+        result.bestSequence = globalBestFeasible.sequence;
+        
+        cout << "\n BEST FEASIBLE SOLUTION:" << endl;
+        cout << "Cost: " << globalBestFeasible.cost << endl;
+        cout << "Found in generation: " << globalBestFeasible.generation << endl;
+        
+        // Display the routes
+        displaySolution(globalBestFeasible.sequence, coords, demand, capacity, depot, dist);
+    } else {
+        vector<vector<int>> routes = decodeSeq(globalBestCostIndividual, depot);
+        result.vehiclesUsed = routes.size();
+        result.bestCost = globalBestCost;
+        result.isFeasible = false;
+        result.bestSequence = globalBestCostIndividual;
+        
+        cout << "\n NO FEASIBLE SOLUTION FOUND!" << endl;
+        cout << "All solutions violated capacity constraints." << endl;
+        
+        // Display best infeasible solution as fallback
+        cout << "\n Best infeasible solution:" << endl;
+        displaySolution(globalBestCostIndividual, coords, demand, capacity, depot, dist);
+    }
+    
+    return result;
+}
+
+// Add this include at the top with other includes
+#include <fstream>
+
+// Add this function to export results to CSV
+void exportToCSV(const string& instanceName, int totalVehicles, int populationSize, double bestCost) {
+    ofstream outFile("ga_results.csv", ios::app);  // Append mode
+    
+    // Check if file is empty, if so, add header
+    ifstream checkFile("ga_results.csv");
+    bool isEmpty = checkFile.peek() == ifstream::traits_type::eof();
+    checkFile.close();
+    
+    if (isEmpty) {
+        outFile << "Instance,Total Vehicles,Population Size,Best Cost" << endl;
+    }
+    
+    // Write data row with fixed precision for cost
+    outFile << instanceName << "," 
+            << totalVehicles << "," 
+            << populationSize << "," 
+            << fixed << setprecision(2) << bestCost << endl;
+            
+    outFile.close();
+    
+    cout << "\nResults exported to ga_results.csv" << endl;
+    cout << "Best cost: " << fixed << setprecision(2) << bestCost << endl;
+}
+
+
+// ======= MAIN FUNCTION =======
+
+int main() {
+    cout << " CVRP SOLVER with GENETIC ALGORITHM" << endl;
+    cout << "====================================" << endl;
+    
+    string filename = "CMT1.vrp";  
+    int vehicle = 5;             
+    int maxGenerations = 100;     
+    int populationSize = 500; // Make this explicit here
+    
+    int n, capacity, depot;
+    vector<pair<double,double>> coords;
+    vector<int> demand;
+    
+    cout << " Reading problem file: " << filename << endl;
+    readCVRP(filename, n, capacity, coords, demand, depot);
+    
+    cout << "Problem details:" << endl;
+    cout << "   Customers: " << n-1 << endl;
+    cout << "   Capacity: " << capacity << endl;
+    cout << "   Depot: " << depot << endl;
+    cout << "   Vehicles: " << vehicle << endl;
+    
+    // Calculate total demand
+    int totalDemand = 0;
+    for (int i = 2; i <= n; i++) {
+        totalDemand += demand[i];
+    }
+    cout << "   Total demand: " << totalDemand << endl;
+    cout << "   Min vehicles needed: " << ceil(totalDemand / (double)capacity) << endl;
+    
+    // Chạy GA và lấy kết quả đầy đủ
+    GAResult result = runGA(maxGenerations, vehicle, n, capacity, depot, coords, demand);
+    
+    // Extract instance name without extension
+    string instanceName = filename;
+    size_t dotPos = instanceName.find_last_of('.');
+    if (dotPos != string::npos) {
+        instanceName = instanceName.substr(0, dotPos);
+    }
+    
+    // Xuất kết quả với giá trị cost đúng
+    exportToCSV(instanceName, result.vehiclesUsed, populationSize, result.bestCost);
+    
+    return 0;
+}
