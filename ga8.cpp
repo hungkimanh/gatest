@@ -10,6 +10,7 @@
 #include <numeric>
 #include <set>
 #include <map>
+#include <chrono>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -1530,14 +1531,14 @@ struct GAResult {
 };
 
 GAResult runGA(int maxGenerations, int vehicle, int n, int capacity, int depot, 
-          const vector<pair<double,double>>& coords, const vector<int>& demand) {
+          const vector<pair<double,double>>& coords, const vector<int>& demand, int populationSize) {
     
     cout << "\n STARTING GENETIC ALGORITHM..." << endl;
     cout << "   Problem: " << n-1 << " customers, " << vehicle << " vehicles, capacity " << capacity << endl;
     cout << "   Running for " << maxGenerations << " generations" << endl;
+    cout << "   Population size: " << populationSize << endl;
     
     vector<vector<double>> dist = buildDist(coords);
-    int populationSize = 500;
     
     // Use the enhanced structured initialization
     vector<vector<int>> population = initStructuredPopulation(populationSize, vehicle, n, capacity, demand, coords, dist, depot);
@@ -1648,7 +1649,44 @@ GAResult runGA(int maxGenerations, int vehicle, int n, int capacity, int depot,
 #include <fstream>
 
 // Add this function to export results to CSV
-void exportToCSV(const string& instanceName, int totalVehicles, int populationSize, double bestCost) {
+// Function to extract optimal cost from VRP file comment
+double extractOptimalCost(const string& filename) {
+    ifstream file(filename);
+    if (!file.is_open()) {
+        cout << "Warning: Cannot open " << filename << " to read optimal cost" << endl;
+        return -1.0;  // Indicate error
+    }
+    
+    string line;
+    while (getline(file, line)) {
+        if (line.find("COMMENT :") != string::npos) {
+            // Extract the number after "COMMENT :"
+            size_t pos = line.find(":");
+            if (pos != string::npos) {
+                string costStr = line.substr(pos + 1);
+                // Remove leading/trailing spaces
+                costStr.erase(0, costStr.find_first_not_of(" \t"));
+                costStr.erase(costStr.find_last_not_of(" \t") + 1);
+                
+                try {
+                    return stod(costStr);
+                } catch (const exception& e) {
+                    cout << "Warning: Cannot parse optimal cost from: " << costStr << endl;
+                    return -1.0;
+                }
+            }
+        }
+        // Stop reading after finding NODE_COORD_SECTION
+        if (line.find("NODE_COORD_SECTION") != string::npos) {
+            break;
+        }
+    }
+    
+    cout << "Warning: Optimal cost not found in " << filename << endl;
+    return -1.0;
+}
+
+void exportToCSV(const string& instanceName, int totalVehicles, int populationSize, int maxGenerations, double bestCost, double optimalCost) {
     ofstream outFile("ga_results.csv", ios::app);  // Append mode
     
     // Check if file is empty, if so, add header
@@ -1657,45 +1695,91 @@ void exportToCSV(const string& instanceName, int totalVehicles, int populationSi
     checkFile.close();
     
     if (isEmpty) {
-        outFile << "Instance,Total Vehicles,Population Size,Best Cost" << endl;
+        outFile << "Instance,Total_Vehicles,Population_Size,Max_Generations,Best_Cost,Optimal_Cost,GAP_Percent" << endl;
+    }
+    
+    // Calculate GAP percentage: (bestCost - optimalCost) / optimalCost * 100
+    double gap = -1.0;  // Default value for missing optimal cost
+    if (optimalCost > 0) {
+        gap = ((bestCost - optimalCost) / optimalCost) * 100.0;
     }
     
     // Write data row with fixed precision for cost
     outFile << instanceName << "," 
             << totalVehicles << "," 
             << populationSize << "," 
-            << fixed << setprecision(2) << bestCost << endl;
+            << maxGenerations << ","
+            << fixed << setprecision(2) << bestCost << ","
+            << fixed << setprecision(2) << optimalCost << ","
+            << fixed << setprecision(2) << gap << endl;
             
     outFile.close();
     
-    cout << "\nResults exported to ga_results.csv" << endl;
+    cout << "\n=== RESULTS EXPORTED TO ga_results.csv ===" << endl;
+    cout << "Instance: " << instanceName << endl;
     cout << "Best cost: " << fixed << setprecision(2) << bestCost << endl;
+    cout << "Optimal cost: " << fixed << setprecision(2) << optimalCost << endl;
+    if (gap >= 0) {
+        cout << "GAP: " << fixed << setprecision(2) << gap << "%" << endl;
+    } else {
+        cout << "GAP: N/A (optimal cost not available)" << endl;
+    }
 }
 
 
 // ======= MAIN FUNCTION =======
 
-int main() {
-    cout << " CVRP SOLVER with GENETIC ALGORITHM" << endl;
+int main(int argc, char* argv[]) {
+    cout << "🚛 CVRP SOLVER with GENETIC ALGORITHM" << endl;
     cout << "====================================" << endl;
     
+    // Default parameters
     string filename = "CMT4.vrp";  
-    //int vehicle = 5;             
-    int maxGenerations = 10000;     
-    int populationSize = 1000; // Make this explicit here
+    int maxGenerations = 1000;     
+    int populationSize = 500;
+    int numRuns = 10;  // Number of times to run each instance
     
+    // Parse command line arguments
+    if (argc >= 2) {
+        filename = argv[1];
+        cout << "📂 Input file: " << filename << endl;
+    } else {
+        cout << "Usage: " << argv[0] << " <VRP_FILE> [GENERATIONS] [POPULATION_SIZE] [NUM_RUNS]" << endl;
+        cout << "Using default parameters..." << endl;
+    }
+    
+    if (argc >= 3) {
+        maxGenerations = atoi(argv[2]);
+        if (maxGenerations <= 0) maxGenerations = 1000;
+    }
+    
+    if (argc >= 4) {
+        populationSize = atoi(argv[3]);
+        if (populationSize <= 0) populationSize = 500;
+    }
+    
+    if (argc >= 5) {
+        numRuns = atoi(argv[4]);
+        if (numRuns <= 0) numRuns = 1;
+    }
+    
+    // Read VRP problem
     int n, capacity, depot, vehicles;
     vector<pair<double,double>> coords;
     vector<int> demand;
     
-    cout << " Reading problem file: " << filename << endl;
-    readCVRP(filename, n, capacity, coords, demand, depot, vehicles );
+    cout << "📂 Reading problem file: " << filename << endl;
+    readCVRP(filename, n, capacity, coords, demand, depot, vehicles);
     
-    cout << "Problem details:" << endl;
+    // Extract optimal cost from file
+    double optimalCost = extractOptimalCost(filename);
+    
+    cout << "\nProblem Configuration:" << endl;
     cout << "   Customers: " << n-1 << endl;
     cout << "   Capacity: " << capacity << endl;
     cout << "   Depot: " << depot << endl;
     cout << "   Vehicles: " << vehicles << endl;
+    cout << "   Optimal cost: " << (optimalCost > 0 ? to_string(optimalCost) : "Unknown") << endl;
     
     // Calculate total demand
     int totalDemand = 0;
@@ -1705,18 +1789,123 @@ int main() {
     cout << "   Total demand: " << totalDemand << endl;
     cout << "   Min vehicles needed: " << ceil(totalDemand / (double)capacity) << endl;
     
-    // Chạy GA và lấy kết quả đầy đủ
-    GAResult result = runGA(maxGenerations, vehicles, n, capacity, depot, coords, demand);
+    cout << "\nAlgorithm Parameters:" << endl;
+    cout << "   Generations: " << maxGenerations << endl;
+    cout << "   Population size: " << populationSize << endl;
+    cout << "   Number of runs: " << numRuns << endl;
     
-    // Extract instance name without extension
+    // Extract instance name without extension and path
     string instanceName = filename;
+    size_t lastSlash = instanceName.find_last_of("/\\");
+    if (lastSlash != string::npos) {
+        instanceName = instanceName.substr(lastSlash + 1);
+    }
     size_t dotPos = instanceName.find_last_of('.');
     if (dotPos != string::npos) {
         instanceName = instanceName.substr(0, dotPos);
     }
     
-    // Xuất kết quả với giá trị cost đúng
-    exportToCSV(instanceName, result.vehiclesUsed, populationSize, result.bestCost);
+    // Variables for statistics
+    vector<double> allCosts;
+    vector<int> allVehicles;
+    vector<bool> allFeasible;
+    int feasibleCount = 0;
     
+    cout << "\n" << string(60, '=') << endl;
+    cout << "🏃 EXECUTING " << numRuns << " RUN" << (numRuns > 1 ? "S" : "") << endl;
+    cout << string(60, '=') << endl;
+    
+    // Run GA multiple times
+    for (int run = 1; run <= numRuns; ++run) {
+        cout << "\n📊 RUN " << run << "/" << numRuns;
+        if (numRuns > 1) {
+            cout << " (" << fixed << setprecision(1) << (100.0 * run / numRuns) << "% completed)";
+        }
+        cout << endl;
+        cout << string(40, '-') << endl;
+        
+        auto start = chrono::high_resolution_clock::now();
+        GAResult result = runGA(maxGenerations, vehicles, n, capacity, depot, coords, demand, populationSize);
+        auto end = chrono::high_resolution_clock::now();
+        
+        auto duration = chrono::duration_cast<chrono::seconds>(end - start);
+        
+        cout << "✅ Run " << run << " completed in " << duration.count() << "s" << endl;
+        cout << "   Cost: " << fixed << setprecision(2) << result.bestCost << endl;
+        cout << "   Vehicles: " << result.vehiclesUsed << endl;
+        cout << "   Status: " << (result.isFeasible ? "✅ FEASIBLE" : "❌ INFEASIBLE") << endl;
+        
+        allCosts.push_back(result.bestCost);
+        allVehicles.push_back(result.vehiclesUsed);
+        allFeasible.push_back(result.isFeasible);
+        
+        if (result.isFeasible) {
+            feasibleCount++;
+        }
+    }
+    
+    // Calculate and display statistics
+    if (!allCosts.empty()) {
+        double sumCost = accumulate(allCosts.begin(), allCosts.end(), 0.0);
+        double meanCost = sumCost / allCosts.size();
+        
+        double sumVehicles = accumulate(allVehicles.begin(), allVehicles.end(), 0.0);
+        double meanVehicles = sumVehicles / allVehicles.size();
+        
+        double minCost = *min_element(allCosts.begin(), allCosts.end());
+        double maxCost = *max_element(allCosts.begin(), allCosts.end());
+        
+        int minVehicles = *min_element(allVehicles.begin(), allVehicles.end());
+        int maxVehicles = *max_element(allVehicles.begin(), allVehicles.end());
+        
+        // Calculate standard deviation
+        double variance = 0.0;
+        for (double cost : allCosts) {
+            variance += (cost - meanCost) * (cost - meanCost);
+        }
+        double stdDev = sqrt(variance / allCosts.size());
+        
+        // Display comprehensive summary
+        cout << "\n" << string(70, '=') << endl;
+        cout << "📈 STATISTICAL SUMMARY (" << numRuns << " runs)" << endl;
+        cout << string(70, '=') << endl;
+        cout << "Instance: " << instanceName << endl;
+        cout << "Success rate: " << feasibleCount << "/" << numRuns 
+             << " (" << fixed << setprecision(1) << (100.0 * feasibleCount / numRuns) << "%)" << endl;
+        
+        cout << "\n🎯 COST ANALYSIS:" << endl;
+        cout << "   Best cost:    " << fixed << setprecision(2) << minCost;
+        if (optimalCost > 0) {
+            double bestGap = ((minCost - optimalCost) / optimalCost) * 100.0;
+            cout << " (GAP: " << fixed << setprecision(2) << bestGap << "%)";
+        }
+        cout << endl;
+        cout << "   Mean cost:    " << fixed << setprecision(2) << meanCost << endl;
+        cout << "   Worst cost:   " << fixed << setprecision(2) << maxCost << endl;
+        cout << "   Std dev:      " << fixed << setprecision(2) << stdDev << endl;
+        if (optimalCost > 0) {
+            cout << "   Optimal cost: " << fixed << setprecision(2) << optimalCost << endl;
+        }
+        
+        cout << "\n🚛 VEHICLE USAGE:" << endl;
+        cout << "   Best vehicles:  " << minVehicles << endl;
+        cout << "   Mean vehicles:  " << fixed << setprecision(1) << meanVehicles << endl;
+        cout << "   Max vehicles:   " << maxVehicles << endl;
+        
+        // Export best result to CSV with GAP calculation
+        exportToCSV(instanceName, minVehicles, populationSize, maxGenerations, minCost, optimalCost);
+        
+        cout << "\n🏆 BEST SOLUTION FOUND:" << endl;
+        auto bestIndex = min_element(allCosts.begin(), allCosts.end()) - allCosts.begin();
+        cout << "   Run #" << (bestIndex + 1) << ": Cost = " << minCost 
+             << ", Vehicles = " << allVehicles[bestIndex] 
+             << ", Status = " << (allFeasible[bestIndex] ? "FEASIBLE" : "INFEASIBLE") << endl;
+        
+    } else {
+        cout << "\n❌ ERROR: No valid results obtained!" << endl;
+        return 1;
+    }
+    
+    cout << "\n✅ Execution completed successfully!" << endl;
     return 0;
 }
