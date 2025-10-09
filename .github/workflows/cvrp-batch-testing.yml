@@ -1,5 +1,6 @@
 name: CVRP Solver - Batch Testing
 
+# This workflow ONLY runs manually - no automatic triggers
 on:
   workflow_dispatch:
     inputs:
