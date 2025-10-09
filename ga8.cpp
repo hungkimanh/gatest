@@ -24,14 +24,14 @@ double euclidDist(double x1, double y1, double x2, double y2) {
     return std::round(d * 100.0) / 100.0;
 }
 
-void readCVRP(const string& filename, int& n, int& capacity, vector<pair<double,double>>& coords, vector<int>& demand, int& depot) {
+void readCVRP(const string& filename, int& n, int& capacity, vector<pair<double,double>>& coords, vector<int>& demand, int& depot, int& vehicles) {
     ifstream file(filename);
     if (!file.is_open()) {
         cerr << "Khong the mo file " << filename << endl;
         exit(1);
     }
     string line;
-    n = 0; capacity = 0; depot = 0;
+    n = 0; capacity = 0; depot = 0; vehicles = 0;
     while (getline(file, line)) {
         if (line.find("DIMENSION") != string::npos) {
             size_t pos = line.find(":");
@@ -39,6 +39,9 @@ void readCVRP(const string& filename, int& n, int& capacity, vector<pair<double,
         } else if (line.find("CAPACITY") != string::npos) {
             size_t pos = line.find(":");
             if (pos != string::npos) capacity = stoi(line.substr(pos+1));
+        } else if (line.find("VEHICLE") != string::npos) {
+            size_t pos = line.find(":");
+            if (pos != string::npos) vehicles = stoi(line.substr(pos+1));
         } else if (line.find("NODE_COORD_SECTION") != string::npos) {
             break;
         }
@@ -83,6 +86,16 @@ void readCVRP(const string& filename, int& n, int& capacity, vector<pair<double,
     if (depot == -1) {
         cerr << "Khong tim thay DEPOT trong file." << endl;
         exit(1);
+    }
+    
+    // If no vehicles information found in file, calculate minimum needed
+    if (vehicles == 0) {
+        int totalDemand = 0;
+        for (int i = 2; i <= n; ++i) {
+            totalDemand += demand[i];
+        }
+        vehicles = (int)ceil((double)totalDemand / capacity);
+        cout << "No VEHICLE info in file. Calculated minimum vehicles: " << vehicles << endl;
     }
 }
 
@@ -807,64 +820,125 @@ void repairZero(vector<int>& seq, int vehicle, mt19937& gen) {
     }
 }
 
-// Simple and robust repairCustomer function
+// Optimized repairCustomer function using count tracking
 void repairCustomer(vector<int>& seq, int n, mt19937& gen) {
-    // Extract only non-zero customers
-    vector<int> customers;
+    // Đếm số lần xuất hiện của mỗi customer
+    vector<int> count(n+1, 0);
     for (int v : seq) {
         if (v != 0 && v >= 2 && v <= n) {
-            customers.push_back(v);
+            count[v]++;
         }
     }
     
-    // Create a set to check what customers we have
-    set<int> present;
-    for (int cust : customers) {
-        present.insert(cust);
-    }
-    
-    // Find missing customers
+    // Tìm danh sách customers bị thiếu (count = 0)
     vector<int> missing;
     for (int i = 2; i <= n; ++i) {
-        if (present.find(i) == present.end()) {
+        if (count[i] == 0) {
             missing.push_back(i);
         }
     }
     
-    // If we have the right number of unique customers, we're done
-    if (missing.empty() && present.size() == n - 1) {
-        return; // Already valid
-    }
+    // Shuffle để randomize việc thay thế
+    shuffle(missing.begin(), missing.end(), gen);
+    int missingIdx = 0;
     
-    // Rebuild customer list: take one of each present customer + all missing
-    vector<int> validCustomers;
-    for (int i = 2; i <= n; ++i) {
-        validCustomers.push_back(i);
-    }
-    
-    // Replace customer part in sequence
-    vector<int> newSeq;
-    int customerIdx = 0;
-    
-    for (int v : seq) {
-        if (v == 0) {
-            newSeq.push_back(0);
-        } else {
-            // Replace with next valid customer
-            if (customerIdx < validCustomers.size()) {
-                newSeq.push_back(validCustomers[customerIdx]);
-                customerIdx++;
+    // Lặp qua sequence và sửa từng vị trí
+    for (int& v : seq) {
+        if (v != 0 && v >= 2 && v <= n) {
+            if (count[v] > 1) {
+                // Customer này bị lặp
+                if (missingIdx < missing.size()) {
+                    // Thay bằng customer bị thiếu
+                    int oldCustomer = v;
+                    int newCustomer = missing[missingIdx];
+                    
+                    v = newCustomer;
+                    count[oldCustomer]--; // Giảm count của customer cũ
+                    count[newCustomer]++; // Tăng count của customer mới
+                    missingIdx++;
+                } else {
+                    // Không còn customer thiếu nào, thay bằng 0
+                    count[v]--; // Giảm count khi thay bằng 0
+                    v = 0;
+                }
             }
         }
     }
     
-    // Add any remaining customers at the end
-    while (customerIdx < validCustomers.size()) {
-        newSeq.push_back(validCustomers[customerIdx]);
-        customerIdx++;
+    // Kiểm tra xem có customer nào còn thiếu không (count = 0)
+    for (int i = 2; i <= n; ++i) {
+        if (count[i] == 0) {
+            // Tìm route ngắn nhất để thêm customer này
+            vector<vector<int>*> routes;
+            vector<int> currentRoute;
+            
+            // Tách sequence thành các routes (dùng pointer để modify)
+            for (int& v : seq) {
+                if (v == 0) {
+                    if (!currentRoute.empty()) {
+                        routes.push_back(new vector<int>(currentRoute));
+                        currentRoute.clear();
+                    }
+                } else {
+                    currentRoute.push_back(v);
+                }
+            }
+            if (!currentRoute.empty()) {
+                routes.push_back(new vector<int>(currentRoute));
+            }
+            
+            if (routes.empty()) {
+                // Không có route nào, thêm vào cuối sequence
+                seq.push_back(i);
+            } else {
+                // Tìm route ngắn nhất
+                int shortestIdx = 0;
+                size_t minLength = routes[0]->size();
+                
+                for (size_t j = 1; j < routes.size(); ++j) {
+                    if (routes[j]->size() < minLength) {
+                        minLength = routes[j]->size();
+                        shortestIdx = j;
+                    }
+                }
+                
+                // Thêm customer vào route ngắn nhất
+                routes[shortestIdx]->push_back(i);
+                
+                // Rebuild sequence từ các routes
+                seq.clear();
+                for (size_t j = 0; j < routes.size(); ++j) {
+                    for (int customer : *routes[j]) {
+                        seq.push_back(customer);
+                    }
+                    if (j < routes.size() - 1) {
+                        seq.push_back(0);
+                    }
+                }
+            }
+            
+            // Cleanup memory
+            for (auto* route : routes) {
+                delete route;
+            }
+            
+            count[i] = 1; // Cập nhật count
+        }
     }
     
-    seq = newSeq;
+    // Kiểm tra cuối cùng: nếu vẫn còn customer nào có count > 1, thay bằng 0
+    bool hasError = true;
+    while (hasError) {
+        hasError = false;
+        for (int& v : seq) {
+            if (v != 0 && v >= 2 && v <= n && count[v] > 1) {
+                count[v]--; // Giảm count
+                v = 0;      // Thay bằng 0
+                hasError = true;
+                break; // Chỉ thay 1 lần mỗi vòng lặp
+            }
+        }
+    }
 }
 void repairCustomerWithLocalSearch(vector<int>& seq, int n, mt19937& gen,
                                  const vector<vector<double>>& dist, 
@@ -1605,23 +1679,23 @@ int main() {
     cout << " CVRP SOLVER with GENETIC ALGORITHM" << endl;
     cout << "====================================" << endl;
     
-    string filename = "CMT1.vrp";  
-    int vehicle = 5;             
-    int maxGenerations = 100;     
-    int populationSize = 500; // Make this explicit here
+    string filename = "CMT4.vrp";  
+    //int vehicle = 5;             
+    int maxGenerations = 10000;     
+    int populationSize = 1000; // Make this explicit here
     
-    int n, capacity, depot;
+    int n, capacity, depot, vehicles;
     vector<pair<double,double>> coords;
     vector<int> demand;
     
     cout << " Reading problem file: " << filename << endl;
-    readCVRP(filename, n, capacity, coords, demand, depot);
+    readCVRP(filename, n, capacity, coords, demand, depot, vehicles );
     
     cout << "Problem details:" << endl;
     cout << "   Customers: " << n-1 << endl;
     cout << "   Capacity: " << capacity << endl;
     cout << "   Depot: " << depot << endl;
-    cout << "   Vehicles: " << vehicle << endl;
+    cout << "   Vehicles: " << vehicles << endl;
     
     // Calculate total demand
     int totalDemand = 0;
@@ -1632,7 +1706,7 @@ int main() {
     cout << "   Min vehicles needed: " << ceil(totalDemand / (double)capacity) << endl;
     
     // Chạy GA và lấy kết quả đầy đủ
-    GAResult result = runGA(maxGenerations, vehicle, n, capacity, depot, coords, demand);
+    GAResult result = runGA(maxGenerations, vehicles, n, capacity, depot, coords, demand);
     
     // Extract instance name without extension
     string instanceName = filename;
