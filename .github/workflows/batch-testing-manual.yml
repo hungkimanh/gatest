@@ -1,4 +1,4 @@
-name: CVRP Solver - Batch Testing
+name: CVRP Batch Testing (Manual Only)
 
 # This workflow ONLY runs manually - no automatic triggers
 on:
