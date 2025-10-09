@@ -1,4 +1,12 @@
-name: Code Quality Check
+name: Code Quality Checks
+
+# Disabled to avoid conflicts with cvrp-solver.yml  
+on:
+  workflow_dispatch:  # Manual trigger only
+  # push:
+  #   branches: [ main ]
+  # pull_request:
+  #   branches: [ main ]ode Quality Check
 
 on:
   push:

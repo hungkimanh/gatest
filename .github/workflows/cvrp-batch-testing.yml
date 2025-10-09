@@ -1,0 +1,217 @@
+name: CVRP Solver - Batch Testing
+
+on:
+  workflow_dispatch:
+    inputs:
+      instances:
+        description: 'VRP instances to test (comma separated)'
+        required: true
+        default: 'CMT1,CMT2,CMT3,CMT4,CMT5'
+        type: string
+      generations:
+        description: 'Number of generations'
+        required: true
+        default: '1000'
+        type: string
+      population:
+        description: 'Population size'
+        required: true
+        default: '500'
+        type: string
+      num_runs:
+        description: 'Number of runs per instance'
+        required: true
+        default: '5'
+        type: string
+      upload_results:
+        description: 'Upload results as artifact'
+        required: false
+        default: true
+        type: boolean
+
+jobs:
+  cvrp-solver:
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        instance: ${{ fromJson(format('[{0}]', join(split(inputs.instances, ','), '","'))) }}
+      fail-fast: false
+      
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Setup C++ environment
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y g++ make
+        
+    - name: Display configuration
+      run: |
+        echo "🚛 CVRP Solver Configuration"
+        echo "=================================="
+        echo "Instance: ${{ matrix.instance }}"
+        echo "Generations: ${{ inputs.generations }}"
+        echo "Population: ${{ inputs.population }}"
+        echo "Runs per instance: ${{ inputs.num_runs }}"
+        echo "=================================="
+        
+    - name: Verify VRP file exists
+      run: |
+        if [ ! -f "${{ matrix.instance }}.vrp" ]; then
+          echo "❌ Error: ${{ matrix.instance }}.vrp not found"
+          ls -la *.vrp
+          exit 1
+        fi
+        echo "✅ Found: ${{ matrix.instance }}.vrp"
+        
+    - name: Compile CVRP Solver
+      run: |
+        echo "🔨 Compiling CVRP Solver..."
+        cd gatest
+        g++ -std=c++17 -O3 -o ga8 ga8.cpp
+        if [ $? -eq 0 ]; then
+          echo "✅ Compilation successful"
+          ./ga8 --version 2>/dev/null || echo "Executable ready"
+        else
+          echo "❌ Compilation failed"
+          exit 1
+        fi
+        
+    - name: Run CVRP Solver
+      run: |
+        echo "🏃 Running CVRP Solver for ${{ matrix.instance }}"
+        cd gatest
+        
+        # Create results directory
+        mkdir -p results_${{ matrix.instance }}
+        
+        # Run the solver with specified parameters
+        timeout 1800 ./ga8 "../${{ matrix.instance }}.vrp" ${{ inputs.generations }} ${{ inputs.population }} ${{ inputs.num_runs }} | tee results_${{ matrix.instance }}/output.log
+        
+        # Check if ga_results.csv was created
+        if [ -f "ga_results.csv" ]; then
+          cp ga_results.csv results_${{ matrix.instance }}/
+          echo "✅ Results exported to CSV"
+          
+          # Display results
+          echo "📊 Results Summary:"
+          cat ga_results.csv
+        else
+          echo "⚠️  Warning: ga_results.csv not found"
+        fi
+        
+    - name: Analyze Results
+      run: |
+        cd gatest
+        if [ -f "results_${{ matrix.instance }}/ga_results.csv" ]; then
+          echo "📈 Analysis for ${{ matrix.instance }}:"
+          
+          # Extract data from CSV (skip header)
+          tail -n +2 results_${{ matrix.instance }}/ga_results.csv | while IFS=',' read -r instance vehicles population cost optimal_cost gap; do
+            echo "  Instance: $instance"
+            echo "  Best Cost: $cost"
+            echo "  Optimal Cost: $optimal_cost"
+            echo "  GAP: $gap%"
+            echo "  Vehicles Used: $vehicles"
+            echo "  Population Size: $population"
+          done
+        fi
+        
+    - name: Prepare Excel-compatible output
+      run: |
+        cd gatest
+        if [ -f "results_${{ matrix.instance }}/ga_results.csv" ]; then
+          # Create Excel-friendly format with tab separation
+          echo "Creating Excel-compatible output..."
+          
+          # Convert CSV to tab-separated format for Excel
+          sed 's/,/\t/g' results_${{ matrix.instance }}/ga_results.csv > results_${{ matrix.instance }}/results_excel.tsv
+          
+          # Create a summary report
+          cat > results_${{ matrix.instance }}/summary_report.md << EOF
+# CVRP Solver Results - ${{ matrix.instance }}
+
+## Configuration
+- **Instance**: ${{ matrix.instance }}
+- **Generations**: ${{ inputs.generations }}
+- **Population Size**: ${{ inputs.population }}
+- **Runs**: ${{ inputs.num_runs }}
+- **Timestamp**: $(date)
+
+## Results
+\`\`\`
+$(cat results_${{ matrix.instance }}/ga_results.csv)
+\`\`\`
+
+## Performance Analysis
+$(tail -n +2 results_${{ matrix.instance }}/ga_results.csv | while IFS=',' read -r instance vehicles population cost optimal_cost gap; do
+  if [ "$gap" != "-1.00" ]; then
+    echo "- GAP from optimal: $gap%"
+  fi
+  echo "- Total vehicles used: $vehicles"
+  echo "- Final cost: $cost"
+done)
+EOF
+
+          echo "✅ Excel-compatible files created"
+        fi
+        
+    - name: Upload results
+      if: ${{ inputs.upload_results }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: cvrp-results-${{ matrix.instance }}
+        path: |
+          gatest/results_${{ matrix.instance }}/
+        retention-days: 30
+        
+    - name: Display final status
+      run: |
+        echo "🏁 Task completed for ${{ matrix.instance }}"
+        cd gatest
+        if [ -f "results_${{ matrix.instance }}/ga_results.csv" ]; then
+          echo "✅ Results available in artifact: cvrp-results-${{ matrix.instance }}"
+        else
+          echo "❌ No results generated"
+          exit 1
+        fi
+
+  # Consolidate all results
+  consolidate-results:
+    needs: cvrp-solver
+    runs-on: ubuntu-latest
+    if: ${{ inputs.upload_results }}
+    
+    steps:
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: all-results/
+        
+    - name: Consolidate results
+      run: |
+        echo "📊 Consolidating all results..."
+        
+        # Create consolidated CSV
+        echo "Instance,Total_Vehicles,Population_Size,Max_Generations,Best_Cost,Optimal_Cost,GAP_Percent" > consolidated_results.csv
+        
+        # Merge all individual results
+        find all-results/ -name "ga_results.csv" -exec tail -n +2 {} \; >> consolidated_results.csv
+        
+        # Create Excel format
+        sed 's/,/\t/g' consolidated_results.csv > consolidated_results.tsv
+        
+        echo "✅ Consolidated results created"
+        echo "📈 Summary:"
+        cat consolidated_results.csv
+        
+    - name: Upload consolidated results
+      uses: actions/upload-artifact@v4
+      with:
+        name: cvrp-consolidated-results
+        path: |
+          consolidated_results.csv
+          consolidated_results.tsv
+        retention-days: 90
