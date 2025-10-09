@@ -5,9 +5,9 @@ on:
   workflow_dispatch:
     inputs:
       instances:
-        description: 'VRP instances to test (comma separated)'
+        description: 'VRP instances to test (JSON array format)'
         required: true
-        default: 'CMT1,CMT2,CMT3,CMT4,CMT5'
+        default: '["CMT1","CMT2","CMT3","CMT4","CMT5"]'
         type: string
       generations:
         description: 'Number of generations'
@@ -36,7 +36,7 @@ jobs:
     
     strategy:
       matrix:
-        instance: ${{ fromJson(format('[{0}]', join(split(inputs.instances, ','), '","'))) }}
+        instance: ${{ fromJson(inputs.instances) }}
       fail-fast: false
       
     steps:
