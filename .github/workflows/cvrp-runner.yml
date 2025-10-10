@@ -1,0 +1,108 @@
+name: CVRP Solver Runner
+
+on:
+  workflow_dispatch:
+    inputs:
+      instance:
+        description: 'Chọn file CMT để chạy'
+        required: true
+        type: choice
+        options:
+          - CMT1
+          - CMT2
+          - CMT3
+          - CMT4
+          - CMT5
+        default: 'CMT4'
+      runs:
+        description: 'Số lần chạy'
+        required: true
+        default: '5'
+        type: string
+      generations:
+        description: 'Số thế hệ (Max Generations)'
+        required: true
+        default: '1000'
+        type: string
+      population:
+        description: 'Kích thước quần thể (Population Size)'
+        required: true
+        default: '500'
+        type: string
+
+jobs:
+  run-cvrp:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup C++ environment
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y g++ make
+        
+    - name: Setup VRP files
+      run: |
+        echo "Copying VRP files from parent directory..."
+        ls -la ../
+        cp ../*.vrp . || echo "No VRP files found in parent, continuing..."
+        ls -la *.vrp || echo "No VRP files available"
+        
+    - name: Compile CVRP Solver
+      run: |
+        g++ -std=c++17 -O3 -o cvrp_solver ga8.cpp
+        ls -la cvrp_solver
+        
+    - name: Display run configuration
+      run: |
+        echo "🚛 CVRP Solver Configuration"
+        echo "=================================="
+        echo "File: ${{ inputs.instance }}.vrp"
+        echo "Số lần chạy: ${{ inputs.runs }}"
+        echo "Generations: ${{ inputs.generations }}"
+        echo "Population: ${{ inputs.population }}"
+        echo "=================================="
+        
+    - name: Run CVRP Solver
+      run: |
+        echo "🚀 Bắt đầu chạy ${{ inputs.instance }}.vrp với ${{ inputs.runs }} lần..."
+        
+        if [ -f "${{ inputs.instance }}.vrp" ]; then
+          ./cvrp_solver "${{ inputs.instance }}.vrp" "${{ inputs.generations }}" "${{ inputs.population }}" "${{ inputs.runs }}"
+        else
+          echo "❌ Không tìm thấy file ${{ inputs.instance }}.vrp"
+          echo "📁 Available files:"
+          ls -la *.vrp
+          exit 1
+        fi
+        
+    - name: Show results
+      run: |
+        echo "📊 KẾT QUẢ CHẠY XONG:"
+        echo "===================="
+        
+        if [ -f ga_results.csv ]; then
+          echo "✅ Results CSV đã được tạo:"
+          echo ""
+          cat ga_results.csv
+          echo ""
+          echo "📈 Thống kê:"
+          echo "- File: ${{ inputs.instance }}.vrp"
+          echo "- Số lần chạy: ${{ inputs.runs }}"
+          echo "- Population: ${{ inputs.population }}"
+          echo "- Generations: ${{ inputs.generations }}"
+        else
+          echo "❌ Không có file kết quả"
+        fi
+        
+    - name: Upload results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: cvrp-results-${{ inputs.instance }}-runs${{ inputs.runs }}
+        path: |
+          ga_results.csv
+          *.log
+        retention-days: 30
