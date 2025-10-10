@@ -1,19 +1,13 @@
-name: CVRP Solver Runner
+name: CVRP Multi-Instance Runner
 
 on:
   workflow_dispatch:
     inputs:
-      instance:
-        description: 'Chọn file CMT để chạy'
+      instances:
+        description: 'Chọn các file CMT (cách nhau bằng dấu phẩy)'
         required: true
-        type: choice
-        options:
-          - CMT1
-          - CMT2
-          - CMT3
-          - CMT4
-          - CMT5
-        default: 'CMT4'
+        default: 'CMT1,CMT2,CMT3,CMT4,CMT5'
+        type: string
       runs:
         description: 'Số lần chạy'
         required: true
@@ -33,6 +27,11 @@ on:
 jobs:
   run-cvrp:
     runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        instance: ${{ fromJson(format('["{0}"]', join(split(inputs.instances, ','), '","'))) }}
+      fail-fast: false
     
     steps:
     - name: Checkout code
@@ -59,50 +58,118 @@ jobs:
       run: |
         echo "🚛 CVRP Solver Configuration"
         echo "=================================="
-        echo "File: ${{ inputs.instance }}.vrp"
+        echo "File: ${{ matrix.instance }}.vrp"
         echo "Số lần chạy: ${{ inputs.runs }}"
         echo "Generations: ${{ inputs.generations }}"
         echo "Population: ${{ inputs.population }}"
         echo "=================================="
         
-    - name: Run CVRP Solver
+    - name: Run CVRP Solver Multiple Times
       run: |
-        echo "🚀 Bắt đầu chạy ${{ inputs.instance }}.vrp với ${{ inputs.runs }} lần..."
+        echo "🚀 Bắt đầu chạy ${{ matrix.instance }}.vrp với ${{ inputs.runs }} lần..."
         
-        if [ -f "${{ inputs.instance }}.vrp" ]; then
-          ./cvrp_solver "${{ inputs.instance }}.vrp" "${{ inputs.generations }}" "${{ inputs.population }}" "${{ inputs.runs }}"
+        if [ -f "${{ matrix.instance }}.vrp" ]; then
+          # Create results file with header
+          echo "Instance,Total_Vehicles,Population_Size,Max_Generations,Best_Cost,Optimal_Cost,GAP_Percent" > ga_results_${{ matrix.instance }}.csv
+          
+          # Run multiple times and accumulate results
+          for i in $(seq 1 ${{ inputs.runs }}); do
+            echo ""
+            echo "📊 === LẦN CHẠY $i/${{ inputs.runs }} cho ${{ matrix.instance }} ==="
+            
+            # Remove old temp result
+            rm -f ga_results.csv
+            
+            # Run once
+            ./cvrp_solver "${{ matrix.instance }}.vrp" "${{ inputs.generations }}" "${{ inputs.population }}" 1
+            
+            if [ -f ga_results.csv ]; then
+              # Get the result line (skip header)
+              result_line=$(tail -1 ga_results.csv)
+              echo "🎯 Kết quả lần $i: $result_line"
+              
+              # Append to accumulated results
+              echo "$result_line" >> ga_results_${{ matrix.instance }}.csv
+              echo "---"
+            else
+              echo "❌ Lỗi lần chạy $i"
+            fi
+          done
+          
+          # Copy accumulated results to standard name for upload
+          cp ga_results_${{ matrix.instance }}.csv ga_results.csv
         else
-          echo "❌ Không tìm thấy file ${{ inputs.instance }}.vrp"
+          echo "❌ Không tìm thấy file ${{ matrix.instance }}.vrp"
           echo "📁 Available files:"
           ls -la *.vrp
           exit 1
         fi
         
-    - name: Show results
+    - name: Show final summary
       run: |
-        echo "📊 KẾT QUẢ CHẠY XONG:"
-        echo "===================="
+        echo ""
+        echo "🎉 === TÓM TẮT KẾT QUẢ ${{ matrix.instance }} ==="
+        echo "============================================="
         
         if [ -f ga_results.csv ]; then
-          echo "✅ Results CSV đã được tạo:"
+          echo "✅ Tất cả kết quả cho ${{ matrix.instance }}:"
           echo ""
           cat ga_results.csv
           echo ""
-          echo "📈 Thống kê:"
-          echo "- File: ${{ inputs.instance }}.vrp"
+          
+          # Calculate statistics
+          echo "� Thống kê tổng hợp:"
+          echo "- File: ${{ matrix.instance }}.vrp"
           echo "- Số lần chạy: ${{ inputs.runs }}"
           echo "- Population: ${{ inputs.population }}"
           echo "- Generations: ${{ inputs.generations }}"
+          
+          # Get best cost (skip header, get minimum cost)
+          if [ $(wc -l < ga_results.csv) -gt 1 ]; then
+            best_cost=$(tail -n +2 ga_results.csv | cut -d',' -f5 | sort -n | head -1)
+            echo "- Best cost: $best_cost"
+          fi
         else
-          echo "❌ Không có file kết quả"
+          echo "❌ Không có file kết quả cho ${{ matrix.instance }}"
         fi
         
-    - name: Upload results
+    - name: Upload results per instance
       uses: actions/upload-artifact@v4
       if: always()
       with:
-        name: cvrp-results-${{ inputs.instance }}-runs${{ inputs.runs }}
+        name: cvrp-results-${{ matrix.instance }}-runs${{ inputs.runs }}
         path: |
           ga_results.csv
           *.log
+        retention-days: 30
+
+  consolidate-results:
+    runs-on: ubuntu-latest
+    needs: run-cvrp
+    if: always()
+    
+    steps:
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      
+    - name: Consolidate all results
+      run: |
+        echo "📋 TỔNG HỢP TẤT CẢ KẾT QUẢ"
+        echo "=========================="
+        echo ""
+        
+        # Create consolidated CSV
+        echo "Instance,Total_Vehicles,Population_Size,Max_Generations,Best_Cost,Optimal_Cost,GAP_Percent" > consolidated_results.csv
+        
+        # Merge all CSV files
+        find . -name "ga_results.csv" -exec tail -n +2 {} \; >> consolidated_results.csv
+        
+        echo "✅ Tất cả kết quả:"
+        cat consolidated_results.csv
+        
+    - name: Upload consolidated results
+      uses: actions/upload-artifact@v4
+      with:
+        name: consolidated-all-results
+        path: consolidated_results.csv
         retention-days: 30
