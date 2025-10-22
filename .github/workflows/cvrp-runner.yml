@@ -6,7 +6,7 @@ on:
       instances:
         description: 'Chọn các file CMT (cách nhau bằng dấu phẩy)'
         required: true
-        default: 'CMT1,CMT2,CMT3,CMT4,CMT5'
+        default: 'CMT1,CMT2,CMT3,CMT4,CMT5,CMT6,CMT7,CMT8'
         type: string
       runs:
         description: 'Số lần chạy'
