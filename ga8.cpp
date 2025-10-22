@@ -1235,7 +1235,7 @@ void repairCustomer(vector<int>& seq, int n, mt19937& gen) {
 void repairCustomerWithLocalSearch(vector<int>& seq, int n, mt19937& gen,
                                  const vector<vector<double>>& dist, 
                                  const vector<int>& demand, int capacity, int depot,
-                                 double maxDistance = 0.0, double serviceTime = 0.0) {
+                                 double maxDistance = 0.0, double serviceTime = 0.0, int maxVehicles = -1) {
     // Bước 1: Sử dụng hàm repairCustomer để sửa duplicate và missing customers
     repairCustomer(seq, n, gen);
     
@@ -1329,64 +1329,11 @@ void repairCustomerWithLocalSearch(vector<int>& seq, int n, mt19937& gen,
                 }
             }
             
-            // Strategy 2: Nếu route chưa được sửa, thử split route
-            if (!routeFixed && worstRoute.size() > 5) {
-                // Chia route thành 2 route nhỏ hơn
-                int midPoint = worstRoute.size() / 2;
-                
-                // Tạo route mới từ nửa sau
-                vector<int> newRoute = {depot};
-                for (size_t i = midPoint; i < worstRoute.size() - 1; i++) {
-                    newRoute.push_back(worstRoute[i]);
-                }
-                newRoute.push_back(depot);
-                
-                // Cắt bớt route cũ
-                worstRoute.erase(worstRoute.begin() + midPoint, worstRoute.end() - 1);
-                
-                // Kiểm tra cả 2 routes có thỏa mãn constraints không
-                double oldRouteTime = calculateRouteTime(worstRoute, dist, serviceTime);
-                double newRouteTime = calculateRouteTime(newRoute, dist, serviceTime);
-                
-                if (oldRouteTime <= maxDistance && newRouteTime <= maxDistance) {
-                    routes.push_back(newRoute);
-                    routeFixed = true;
-                } else {
-                    // Rollback nếu split không hiệu quả
-                    for (size_t i = 1; i < newRoute.size() - 1; i++) {
-                        worstRoute.insert(worstRoute.end() - 1, newRoute[i]);
-                    }
-                }
-            }
+            // Strategy 2: DISABLED - Không split route để giữ nguyên số vehicles
+            // (Chỉ di chuyển customers giữa các routes hiện có)
             
-            // Strategy 3: Nếu vẫn không sửa được, tạo routes đơn cho customers có demand cao
-            if (!routeFixed && worstRoute.size() > 3) {
-                // Tìm customer có demand cao nhất trong route
-                int maxDemandCustomer = -1;
-                int maxDemand = 0;
-                int maxDemandPos = -1;
-                
-                for (size_t i = 1; i < worstRoute.size() - 1; i++) {
-                    int customer = worstRoute[i];
-                    if (demand[customer] > maxDemand) {
-                        maxDemand = demand[customer];
-                        maxDemandCustomer = customer;
-                        maxDemandPos = i;
-                    }
-                }
-                
-                if (maxDemandCustomer != -1) {
-                    // Tạo route mới chỉ cho customer này
-                    vector<int> singleCustomerRoute = {depot, maxDemandCustomer, depot};
-                    double singleRouteTime = calculateRouteTime(singleCustomerRoute, dist, serviceTime);
-                    
-                    if (singleRouteTime <= maxDistance) {
-                        worstRoute.erase(worstRoute.begin() + maxDemandPos);
-                        routes.push_back(singleCustomerRoute);
-                        routeFixed = true;
-                    }
-                }
-            }
+            // Strategy 3: DISABLED - Không tạo routes đơn để giữ nguyên số vehicles  
+            // (Chỉ di chuyển customers giữa các routes hiện có)
         }
     }
     
@@ -1505,10 +1452,10 @@ pair<vector<int>, vector<int>> crossoverOnePoint(const vector<int>& parent1, con
     child2.insert(child2.end(), parent2.begin(), parent2.begin() + cut);
     child2.insert(child2.end(), parent1.begin() + cut, parent1.end());
 
-    repairCustomerWithLocalSearch(child1, n, gen, dist, demand, capacity, depot, maxDistance, serviceTime);
+    repairCustomerWithLocalSearch(child1, n, gen, dist, demand, capacity, depot, maxDistance, serviceTime, vehicle);
     repairZero(child1, vehicle, gen);
 
-    repairCustomerWithLocalSearch(child2, n, gen, dist, demand, capacity, depot, maxDistance, serviceTime);
+    repairCustomerWithLocalSearch(child2, n, gen, dist, demand, capacity, depot, maxDistance, serviceTime, vehicle);
     repairZero(child2, vehicle, gen);
 
     return {child1, child2};
@@ -1594,9 +1541,9 @@ pair<vector<int>, vector<int>> crossoverOX(const vector<int>& parent1, const vec
     }
     
     // Repair customers first, then zeros
-    repairCustomerWithLocalSearch(child1, n, gen, dist, demand, capacity, depot, maxDistance, serviceTime);
+    repairCustomerWithLocalSearch(child1, n, gen, dist, demand, capacity, depot, maxDistance, serviceTime, vehicle);
     repairZero(child1, vehicle, gen);
-    repairCustomerWithLocalSearch(child2, n, gen, dist, demand, capacity, depot, maxDistance, serviceTime);
+    repairCustomerWithLocalSearch(child2, n, gen, dist, demand, capacity, depot, maxDistance, serviceTime, vehicle);
     repairZero(child2, vehicle, gen);
     
     return {child1, child2};
@@ -1684,9 +1631,9 @@ pair<vector<int>, vector<int>> crossoverPMX(const vector<int>& parent1, const ve
     
     // Repair zeros to ensure valid format
     repairZero(child1, vehicle, gen);
-    repairCustomerWithLocalSearch(child1, n, gen, dist, demand, capacity, depot, maxDistance, serviceTime);
+    repairCustomerWithLocalSearch(child1, n, gen, dist, demand, capacity, depot, maxDistance, serviceTime, vehicle);
     repairZero(child2, vehicle, gen);
-    repairCustomerWithLocalSearch(child2, n, gen, dist, demand, capacity, depot, maxDistance, serviceTime);
+    repairCustomerWithLocalSearch(child2, n, gen, dist, demand, capacity, depot, maxDistance, serviceTime, vehicle);
 
     return {child1, child2};
 }
@@ -1902,7 +1849,7 @@ void mutate(vector<int>& seq, int n, int vehicle, const vector<int>& demand,
         }
     }
     
-    repairCustomerWithLocalSearch(seq, n, gen, dist, demand, capacity, depot, maxDistance, serviceTime);
+    repairCustomerWithLocalSearch(seq, n, gen, dist, demand, capacity, depot, maxDistance, serviceTime, vehicle);
     repairZero(seq, vehicle, gen);
 }
 
@@ -2216,7 +2163,7 @@ GAResult runGA(int maxGenerations, int vehicle, int n, int capacity, int depot,
     cout << "   Run seed: " << seed << " (run #" << runNumber << ")" << endl;
     
     for (auto& seq : population) {
-        repairCustomerWithLocalSearch(seq, n, gen, dist, demand, capacity, depot, maxDistance, serviceTime);
+        repairCustomerWithLocalSearch(seq, n, gen, dist, demand, capacity, depot, maxDistance, serviceTime, vehicle);
         repairZero(seq, vehicle, gen);
     }
     
